@@ -1,0 +1,50 @@
+{
+  "expo": {
+    "name": "LocalTransportApp",
+    "slug": "LocalTransportApp",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "plugins": ["expo-firebase-core"],
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "edgeToEdgeEnabled": true
+    },
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "config": {
+        "firebase": {
+          "apiKey": "AIzaSyAZf-KMgaokOF-PVhxgXG64bxWK28_h9-0",
+          "authDomain": "local-transport-booking-app.firebaseapp.com",
+          "projectId": "local-transport-booking-app",
+          "storageBucket": "local-transport-booking-app.appspot.com",
+          "messagingSenderId": "603930160592",
+          "appId": "1:603930160592:web:b24160e5dbb69305ad1dd5"
+        }
+      }
+    },
+    "extra": {
+      "firebase": {
+        "apiKey": "AIzaSyAZf-KMgaokOF-PVhxgXG64bxWK28_h9-0",
+        "authDomain": "local-transport-booking-app.firebaseapp.com",
+        "projectId": "local-transport-booking-app",
+        "storageBucket": "local-transport-booking-app.appspot.com",
+        "messagingSenderId": "603930160592",
+        "appId": "1:603930160592:web:b24160e5dbb69305ad1dd5"
+      }
+    }
+  }
+}
