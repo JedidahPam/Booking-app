@@ -11,8 +11,13 @@ import {
   Title,
   Tooltip,
   Legend,
-  ArcElement
+  ArcElement,
 } from 'chart.js';
+
+import { saveAs } from 'file-saver';
+import * as XLSX from 'xlsx';
+import jsPDF from 'jspdf';
+import 'jspdf-autotable';
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend, ArcElement);
 
@@ -38,15 +43,11 @@ export default function RideAnalytics() {
     fetchRides();
   }, []);
 
-  // Total rides
   const totalRides = rides.length;
-
-  // Total earnings (sum of finalFare)
   const totalEarnings = rides.reduce((sum, ride) => sum + (ride.finalFare || 0), 0).toFixed(2);
 
-  // Count rides by status for pie chart
   const statusCounts = rides.reduce((acc, ride) => {
-    const status = ride.status || 'unknown';
+    const status = ride.status || 'Unknown';
     acc[status] = (acc[status] || 0) + 1;
     return acc;
   }, {});
@@ -63,7 +64,6 @@ export default function RideAnalytics() {
     ],
   };
 
-  // Rides per day (for bar chart)
   const ridesByDay = rides.reduce((acc, ride) => {
     const date = ride.createdAt?.seconds
       ? new Date(ride.createdAt.seconds * 1000).toLocaleDateString()
@@ -83,22 +83,116 @@ export default function RideAnalytics() {
     ],
   };
 
+  // --- Export Functions ---
+
+  const exportToCSV = () => {
+    if (!rides.length) return;
+
+    const headers = ['Created Date', 'Status', 'Final Fare'];
+
+    const rows = rides.map(ride => {
+      const date = ride.createdAt?.seconds
+        ? new Date(ride.createdAt.seconds * 1000).toLocaleDateString()
+        : 'Unknown';
+      return [
+        date,
+        ride.status || 'Unknown',
+        ride.finalFare != null ? ride.finalFare.toFixed(2) : '0.00',
+      ];
+    });
+
+    const csvContent = [headers, ...rows]
+      .map(row => row.map(cell => `"${cell}"`).join(','))
+      .join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    saveAs(blob, 'rides_export.csv');
+  };
+
+  const exportToXLSX = () => {
+    if (!rides.length) return;
+
+    const data = rides.map(ride => ({
+      'Created Date': ride.createdAt?.seconds
+        ? new Date(ride.createdAt.seconds * 1000).toLocaleDateString()
+        : 'Unknown',
+      Status: ride.status || 'Unknown',
+      'Final Fare': ride.finalFare != null ? ride.finalFare.toFixed(2) : '0.00',
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(data);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Rides');
+    XLSX.writeFile(workbook, 'rides_export.xlsx');
+  };
+
+  const exportToPDF = () => {
+    if (!rides.length) return;
+
+    const doc = new jsPDF();
+
+    const tableColumn = ['Created Date', 'Status', 'Final Fare'];
+    const tableRows = rides.map(ride => [
+      ride.createdAt?.seconds
+        ? new Date(ride.createdAt.seconds * 1000).toLocaleDateString()
+        : 'Unknown',
+      ride.status || 'Unknown',
+      ride.finalFare != null ? ride.finalFare.toFixed(2) : '0.00',
+    ]);
+
+    doc.text('Rides Export', 14, 15);
+    doc.autoTable({
+      head: [tableColumn],
+      body: tableRows,
+      startY: 20,
+      styles: { fontSize: 8 },
+      headStyles: { fillColor: [0, 123, 255] },
+    });
+
+    doc.save('rides_export.pdf');
+  };
+
   return (
-    <div>
-      <h2>Ride Analytics</h2>
+    <div
+      style={{
+        padding: '2rem',
+        fontFamily: 'Arial, sans-serif',
+        backgroundColor: '#f8f9fa',
+        borderRadius: '10px',
+        boxShadow: '0 2px 10px rgba(0,0,0,0.1)',
+        minHeight: '100vh',
+      }}
+    >
+      <h2 style={{ marginBottom: '1rem', color: '#333' }}>Ride Analytics</h2>
 
       {loading ? (
-        <p>Loading analytics...</p>
+        <p style={{ fontFamily: 'sans-serif' }}>Loading analytics...</p>
       ) : (
         <>
-          <p><strong>Total Rides:</strong> {totalRides}</p>
-          <p><strong>Total Earnings:</strong> ${totalEarnings}</p>
+          <p style={{ marginBottom: '0.5rem' }}>
+            <strong>Total Rides:</strong> {totalRides}
+          </p>
+          <p style={{ marginBottom: '2rem' }}>
+            <strong>Total Earnings:</strong> ${totalEarnings}
+          </p>
 
-          <div style={{ maxWidth: 600, marginBottom: 40 }}>
+          <div style={{ marginBottom: '1rem' }}>
+            <button onClick={exportToCSV} style={btnExport}>
+              Export to CSV
+            </button>{' '}
+            <button onClick={exportToXLSX} style={btnExport}>
+              Export to XLSX
+            </button>{' '}
+            <button onClick={exportToPDF} style={btnExport}>
+              Export to PDF
+            </button>
+          </div>
+
+          <div style={{ maxWidth: '600px', marginBottom: '3rem' }}>
             <Pie data={pieData} />
           </div>
 
-          <div style={{ maxWidth: 600 }}>
+          <div style={{ maxWidth: '600px' }}>
             <Bar data={barData} />
           </div>
         </>
@@ -106,3 +200,13 @@ export default function RideAnalytics() {
     </div>
   );
 }
+
+const btnExport = {
+  padding: '8px 16px',
+  backgroundColor: '#007bff',
+  color: '#fff',
+  border: 'none',
+  borderRadius: '5px',
+  cursor: 'pointer',
+  marginRight: '1rem',
+};

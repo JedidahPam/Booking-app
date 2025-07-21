@@ -24,13 +24,13 @@ import polyline from '@mapbox/polyline';
 import SettingsPanel from './SettingsPanel';
 import SettingsScreen from './SettingsScreen';
 import { useTheme } from './ThemeContext';
-import { collection, query, where, getDocs } from 'firebase/firestore';
-import { db } from './firebaseConfig';  // Adjust path if needed
-import RNHTMLtoPDF from 'react-native-html-to-pdf';
-import * as FileSystem from 'expo-file-system';
+import { collection, query, where, getDocs, doc, getDoc, addDoc } from 'firebase/firestore';
+import { db, auth } from './firebaseConfig';  // Adjust path if needed
+import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
-// ...
 import haversine from 'haversine-distance';
+import { serverTimestamp } from 'firebase/firestore';
+
 
 const OPENCAGE_API_KEY = 'a87b854ab508451da44974719031b90b';
 const OPENROUTESERVICE_API_KEY =
@@ -62,6 +62,8 @@ export default function TravelDetailsScreen() {
   const typingTimeout = useRef(null);
   const [driverLocation, setDriverLocation] = useState(null);
   const [collapsed, setCollapsed] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState('cash');
+  const [paymentModalVisible, setPaymentModalVisible] = useState(false);
 
   // Driver selection states
   const [drivers, setDrivers] = useState([]);
@@ -69,40 +71,77 @@ export default function TravelDetailsScreen() {
   const [selectedDriver, setSelectedDriver] = useState(null);
   const [fetchingDrivers, setFetchingDrivers] = useState(false);
 
+  const [paymentDone, setPaymentDone] = React.useState(false);
+  
+
+  const bookRide = async (rideId, driverId, pickup, dropoff) => {
+  const userId = auth.currentUser.uid;
+
+  try {
+    // 1. Create ride document (your existing logic)
+    await setDoc(doc(db, 'rides', rideId), {
+      rideId,
+      userId,
+      driverId,
+      pickup,
+      dropoff,
+      status: 'pending',
+      timestamp: serverTimestamp(),
+    });
+
+    // 2. Create chat document
+    await setDoc(doc(db, 'chats', rideId), {
+      rideId,
+      userId,
+      driverId,
+    });
+
+    // 3. Add welcome message from user
+    await addDoc(collection(db, 'chats', rideId, 'messages'), {
+      senderId: userId,
+      text: 'Hi driver, I’ve just booked the ride!',
+      timestamp: serverTimestamp(),
+    });
+
+    console.log('Ride and chat initialized successfully!');
+  } catch (error) {
+    console.error('Booking error:', error);
+    Alert.alert('Booking Failed', 'Please try again.');
+  }
+};
+
   // Refs for inputs to enable focusing on edit icon press
   const pickupInputRef = useRef(null);
   const dropoffInputRef = useRef(null);
 
-  const generateAndShareTicket = async () => {
-  const htmlContent = `
-    <h1 style="text-align:center;">🎫 Transport Ticket</h1>
-    <p><strong>Transport:</strong> ${selectedTransport.toUpperCase()}</p>
-    <p><strong>From:</strong> ${pickup?.address}</p>
-    <p><strong>To:</strong> ${dropoff?.address}</p>
-    <p><strong>Distance:</strong> ${distance} km</p>
-    <p><strong>Price:</strong> $${price}</p>
-    <p><strong>ETA:</strong> ${travelTime} min</p>
-    <p>Thank you for using our service!</p>
-  `;
+  const saveRideToFirestore = async () => {
+    if (!auth.currentUser || !pickup || !dropoff || !price || !selectedTransport) return;
 
-  try {
-    const file = await RNHTMLtoPDF.convert({
-      html: htmlContent,
-      fileName: `ticket_${Date.now()}`,
-      base64: false,
-    });
+    try {
+      const rideData = {
+        userId: auth.currentUser.uid,
+        pickup,
+        dropoff,
+        price: parseFloat(price),
+        distance: parseFloat(distance),
+        transport: selectedTransport,
+        paymentMethod,
+        timestamp: new Date().toISOString(),
+        status: 'pending',
+      };
 
-    if (await Sharing.isAvailableAsync()) {
-      await Sharing.shareAsync(file.filePath);
-    } else {
-      Alert.alert('Ticket Ready', `Ticket saved to ${file.filePath}`);
+      const docRef = await addDoc(collection(db, 'rides'), rideData);
+      console.log('Ride saved with ID:', docRef.id);
+      return docRef.id;
+    } catch (error) {
+      console.error('Error saving ride:', error);
+      Alert.alert('Error', 'Could not save ride to Firestore');
     }
-  } catch (error) {
-    Alert.alert('Error', 'Could not generate ticket: ' + error.message);
-  }
-};
+  };
 
- 
+  // Fixed fetchNearbyDrivers function
+  // Fixed fetchNearbyDrivers function
+// Fixed fetchNearbyDrivers function to handle nested vehicle info
 const fetchNearbyDrivers = async () => {
   if (!pickup) {
     Alert.alert('Pickup location not set');
@@ -110,46 +149,205 @@ const fetchNearbyDrivers = async () => {
   }
   setFetchingDrivers(true);
   try {
+    // Get drivers from the drivers collection
     const driversRef = collection(db, 'drivers');
-    const q = query(driversRef, where('isAvailable', '==', true));
-    const querySnapshot = await getDocs(q);
+    const querySnapshot = await getDocs(driversRef);
 
-    // Map Firestore documents to driver objects
-    const driversFromFirestore = querySnapshot.docs.map(doc => {
-      const data = doc.data();
-      return {
-        id: doc.id,
-        name: data.name,
-        rating: data.rating,
-        vehicle: data.vehicle,
-        latitude: data.latitude,
-        longitude: data.longitude,
-        photoURL: data.photoURL || null,  // Add this line
+    const driversFromFirestore = [];
+
+    // Process each driver document
+    for (const driverDoc of querySnapshot.docs) {
+      const driverData = driverDoc.data();
+      const driverId = driverDoc.id;
+      
+      // Fetch vehicle info from the nested vehicleInfo subcollection
+      let vehicleDetails = {
+        make: 'Unknown Make',
+        model: 'Unknown Model',
+        year: 'Unknown Year',
+        color: 'Unknown Color',
+        licensePlate: 'Unknown Plate',
+        vehicleType: 'car'
       };
-    });
 
-    // Filter drivers by distance (within 10 km of pickup)
-    const filteredDrivers = driversFromFirestore.filter(driver => {
-      if (!driver.latitude || !driver.longitude) return false;
-      const distanceKm = haversine(
-        { latitude: driver.latitude, longitude: driver.longitude },
-        { latitude: pickup.latitude, longitude: pickup.longitude }
-      ) / 1000;
-      return distanceKm <= 10;
-    });
+      try {
+        // Get all documents from the vehicleInfo subcollection
+        const vehicleInfoRef = collection(db, 'drivers', driverId, 'vehicleInfo');
+        const vehicleSnapshot = await getDocs(vehicleInfoRef);
+        
+        if (!vehicleSnapshot.empty) {
+          // If there are multiple vehicle documents, take the first one
+          // Or you could modify this logic to handle multiple vehicles
+          const vehicleDoc = vehicleSnapshot.docs[0];
+          const vehicleData = vehicleDoc.data();
+          
+          vehicleDetails = {
+            make: vehicleData.make || 'Unknown Make',
+            model: vehicleData.model || 'Unknown Model',
+            year: vehicleData.year || 'Unknown Year',
+            color: vehicleData.color || 'Unknown Color',
+            licensePlate: vehicleData.licensePlate || vehicleData.plateNumber || 'Unknown Plate',
+            vehicleType: vehicleData.vehicleType || vehicleData.type || 'car',
+            // Add any other vehicle fields you have
+            capacity: vehicleData.capacity || 4,
+            fuelType: vehicleData.fuelType || 'Unknown',
+          };
+        }
+      } catch (vehicleError) {
+        console.error(`Error fetching vehicle info for driver ${driverId}:`, vehicleError);
+        // vehicleDetails will use default values
+      }
 
-    if (filteredDrivers.length === 0) {
-      Alert.alert('No available drivers found nearby.');
+      // Create complete driver object
+      const driverInfo = {
+        id: driverId,
+        // Personal details from drivers collection
+        name: driverData.firstname && driverData.lastname 
+          ? `${driverData.firstname} ${driverData.lastname}` 
+          : driverData.name || 'Unknown Driver',
+        email: driverData.email || '',
+        phone: driverData.phone || '',
+        profileImage: driverData.profileImage || driverData.photoURL || null,
+        
+        // Driver-specific details
+        rating: driverData.rating || 4.5,
+        
+        // Vehicle details from nested collection
+        vehicle: `${vehicleDetails.year} ${vehicleDetails.make} ${vehicleDetails.model}`.trim(),
+        vehicleDetails: vehicleDetails, // Store complete vehicle info
+        vehicleType: vehicleDetails.vehicleType,
+        licensePlate: vehicleDetails.licensePlate,
+        
+        // Location data
+        latitude: driverData.latitude || null,
+        longitude: driverData.longitude || null,
+        isAvailable: driverData.isAvailable !== false,
+        
+        // Additional driver info
+        createdAt: driverData.createdAt || null,
+        uid: driverData.uid || driverId,
+      };
+
+      driversFromFirestore.push(driverInfo);
     }
 
-    setDrivers(filteredDrivers);
+    // Filter drivers that have location data and are available
+    const driversWithLocation = driversFromFirestore.filter(driver => {
+      return driver.latitude && driver.longitude && driver.isAvailable;
+    });
+
+    // If no drivers have location data, show mock drivers nearby (for testing)
+    let finalDrivers = driversWithLocation;
+    if (driversWithLocation.length === 0) {
+      console.log('No drivers with location found, creating mock drivers nearby');
+      
+      // Create mock drivers near the pickup location for testing
+      const mockDrivers = driversFromFirestore.slice(0, 3).map((driver, index) => ({
+        ...driver,
+        latitude: pickup.latitude + (Math.random() - 0.5) * 0.01,
+        longitude: pickup.longitude + (Math.random() - 0.5) * 0.01,
+        isAvailable: true,
+        name: driver.name || `Driver ${index + 1}`,
+        vehicle: driver.vehicle || `2022 Toyota Camry`, // Better mock data
+        rating: driver.rating || (4.0 + Math.random()).toFixed(1),
+        vehicleDetails: {
+          make: 'Toyota',
+          model: 'Camry',
+          year: '2022',
+          color: ['White', 'Black', 'Silver'][index] || 'White',
+          licensePlate: `ABC-${1000 + index}`,
+          vehicleType: 'sedan',
+        },
+      }));
+      
+      finalDrivers = mockDrivers;
+    } else {
+      // Filter drivers by distance (within 10 km of pickup)
+      finalDrivers = driversWithLocation.filter(driver => {
+        const distanceKm = haversine(
+          { latitude: driver.latitude, longitude: driver.longitude },
+          { latitude: pickup.latitude, longitude: pickup.longitude }
+        ) / 1000;
+        return distanceKm <= 10;
+      });
+    }
+
+    if (finalDrivers.length === 0) {
+      Alert.alert('No available drivers found nearby.');
+      return;
+    }
+
+    console.log('Final drivers with vehicle details:', finalDrivers);
+    setDrivers(finalDrivers);
     setDriversVisible(true);
+    
   } catch (error) {
+    console.error('Error fetching drivers:', error);
     Alert.alert('Error fetching drivers', error.message);
   } finally {
     setFetchingDrivers(false);
   }
 };
+  useEffect(() => {
+    const checkUserStatus = async () => {
+      if (!auth.currentUser) return;
+
+      try {
+        const userDocRef = doc(db, 'users', auth.currentUser.uid);
+        const userDocSnap = await getDoc(userDocRef);
+
+        if (userDocSnap.exists()) {
+          const userData = userDocSnap.data();
+
+          if (userData.approved === false || userData.blocked === true) {
+            Alert.alert(
+              'Account Blocked',
+              'Your account has been blocked. Please contact support.',
+              [
+                {
+                  text: 'OK',
+                  onPress: () => navigation.reset({ index: 0, routes: [{ name: 'SignIn' }] }),
+                },
+              ],
+              { cancelable: false }
+            );
+          }
+        }
+      } catch (error) {
+        console.error('Error checking user status:', error);
+      }
+    };
+
+    checkUserStatus();
+  }, []);
+
+  const generateAndShareTicket = async () => {
+    const htmlContent = `
+      <h1 style="text-align:center;">🎫 Transport Ticket</h1>
+      <p><strong>Transport:</strong> ${selectedTransport.toUpperCase()}</p>
+      <p><strong>From:</strong> ${pickup?.address || 'N/A'}</p>
+      <p><strong>To:</strong> ${dropoff?.address || 'N/A'}</p>
+      <p><strong>Distance:</strong> ${distance || 'N/A'} km</p>
+      <p><strong>Price:</strong> $${price || 'N/A'}</p>
+      <p><strong>ETA:</strong> ${travelTime || 'N/A'} min</p>
+      <p>Thank you for using our service!</p>
+    `;
+
+    try {
+      const { uri } = await Print.printToFileAsync({
+        html: htmlContent,
+        base64: false,
+      });
+
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri);
+      } else {
+        Alert.alert('Ticket Ready', `Ticket saved to ${uri}`);
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Could not generate ticket: ' + error.message);
+    }
+  };
 
   useEffect(() => {
     (async () => {
@@ -268,122 +466,189 @@ const fetchNearbyDrivers = async () => {
     </TouchableOpacity>
   );
 
- 
-
   const onConfirmOrder = () => {
-    if (!pickup || !dropoff) {
-      Alert.alert('Please set both pickup and dropoff locations');
-      return;
-    }
-    fetchNearbyDrivers();
-  };
+  if (!pickup || !dropoff) {
+    Alert.alert('Missing Details', 'Please set both pickup and dropoff locations');
+    return;
+  }
 
-  const renderDriverItem = ({ item }) => {
+  if (!paymentDone) {
+    Alert.alert(
+      'Payment Required',
+      'Please select a payment method before confirming your order.',
+      [
+        {
+          text: 'OK',
+          onPress: () => setPaymentModalVisible(true),
+        },
+      ]
+    );
+    return;
+  }
+
+  fetchNearbyDrivers();
+};
+
+
+ // Updated renderDriverItem to show detailed vehicle information
+const renderDriverItem = ({ item }) => {
   const isSelected = selectedDriver?.id === item.id;
+  const vehicleDetails = item.vehicleDetails || {};
+  
   return (
     <TouchableOpacity
       style={[styles.driverItem, isSelected && styles.driverItemSelected]}
       onPress={() => setSelectedDriver(item)}
     >
       <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-        {item.photoURL ? (
+        {/* Driver Profile Image */}
+        {item.profileImage || item.photoURL ? (
           <Image
-            source={{ uri: item.photoURL }}
-            style={{ width: 40, height: 40, borderRadius: 20, marginRight: 12 }}
+            source={{ uri: item.profileImage || item.photoURL }}
+            style={{ width: 50, height: 50, borderRadius: 25, marginRight: 12 }}
           />
         ) : (
           <Ionicons
             name="person-circle-outline"
-            size={40}
+            size={50}
             color="#ccc"
             style={{ marginRight: 12 }}
           />
         )}
-        <View>
-          <Text style={styles.driverName}>{item.name}</Text>
-          <Text style={styles.driverDetails}>
-            {item.vehicle} | ⭐ {item.rating}
+        
+        {/* Driver and Vehicle Information */}
+        <View style={{ flex: 1 }}>
+          {/* Driver Name and Rating */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Text style={[styles.driverName, isSelected && { color: '#fff' }]}>
+              {item.name}
+            </Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+              <Ionicons name="star" size={14} color="#FFD700" />
+              <Text style={[styles.driverRating, isSelected && { color: '#fff' }]}>
+                {item.rating}
+              </Text>
+            </View>
+          </View>
+          
+          {/* Vehicle Make, Model, Year */}
+          <Text style={[styles.vehicleMain, isSelected && { color: '#fff' }]}>
+            {vehicleDetails.year} {vehicleDetails.make} {vehicleDetails.model}
           </Text>
+          
+          {/* Vehicle Color and License Plate */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
+            <Text style={[styles.vehicleDetails, isSelected && { color: '#fff' }]}>
+              {vehicleDetails.color} • {vehicleDetails.licensePlate}
+            </Text>
+          </View>
+          
+          {/* Vehicle Type and Capacity (if available) */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
+            <Ionicons 
+              name={
+                vehicleDetails.vehicleType === 'sedan' ? 'car-sport' :
+                vehicleDetails.vehicleType === 'suv' ? 'car' :
+                vehicleDetails.vehicleType === 'van' ? 'bus' :
+                'car-outline'
+              } 
+              size={12} 
+              color={isSelected ? '#fff' : '#666'} 
+            />
+            <Text style={[styles.vehicleType, isSelected && { color: '#fff' }]}>
+              {vehicleDetails.vehicleType?.toUpperCase() || 'CAR'}
+              {vehicleDetails.capacity ? ` • ${vehicleDetails.capacity} seats` : ''}
+            </Text>
+          </View>
         </View>
       </View>
     </TouchableOpacity>
   );
 };
 
-
   return (
-    
     <View style={styles.mainContainer}>
- <View style={[styles.topHeader, { justifyContent: 'flex-end' }]}>
-    <TouchableOpacity
-      onPress={() => navigation.navigate('NotificationsScreen')}
-      style={[styles.settingsButton, { marginRight: 16 }]} // add margin between icons
-      accessibilityLabel="Go to notifications"
-    >
-      <Ionicons
-        name="notifications-outline"
-        size={28}
-        color={darkMode ? '#FFA500' : '#444'}
-      />
-    </TouchableOpacity>
+      <View style={[styles.topHeader, { justifyContent: 'flex-end' }]}>
+        <TouchableOpacity
+          onPress={() => navigation.navigate('NotificationsScreen')}
+          style={[styles.settingsButton, { marginRight: 16 }]}
+          accessibilityLabel="Go to notifications"
+        >
+          <Ionicons
+            name="notifications-outline"
+            size={28}
+            color={darkMode ? '#FFA500' : '#444'}
+          />
+        </TouchableOpacity>
 
-    <TouchableOpacity
-      onPress={() => setSettingsVisible(true)}
-      style={styles.settingsButton}
-      accessibilityLabel="Open settings"
-    >
-      <Ionicons
-        name="settings-outline"
-        size={28}
-        color={darkMode ? '#FFA500' : '#444'}
-      />
-    </TouchableOpacity>
-  </View>
+        <TouchableOpacity
+          onPress={() => setSettingsVisible(true)}
+          style={styles.settingsButton}
+          accessibilityLabel="Open settings"
+        >
+          <Ionicons
+            name="settings-outline"
+            size={28}
+            color={darkMode ? '#FFA500' : '#444'}
+          />
+        </TouchableOpacity>
+      </View>
 
       {region && (
-       <MapView style={StyleSheet.absoluteFillObject} region={region} showsUserLocation>
-  {pickup && <Marker coordinate={pickup} pinColor="green" />}
-  {dropoff && <Marker coordinate={dropoff} pinColor="red" />}
+        <MapView style={StyleSheet.absoluteFillObject} region={region} showsUserLocation>
+          {pickup && <Marker coordinate={pickup} pinColor="green" />}
+          {dropoff && <Marker coordinate={dropoff} pinColor="red" />}
+          
+          {drivers.map((driver) => {
+  const vehicleDetails = driver.vehicleDetails || {};
   
-  {/* Add driver markers */}
-  {drivers.map((driver) => (
+  return (
     <Marker
       key={driver.id}
       coordinate={{ latitude: driver.latitude, longitude: driver.longitude }}
-      pinColor="blue"
       title={driver.name}
-      description={`${driver.vehicle} | Rating: ${driver.rating}`}
-    />
-  ))}
-
-  {routeCoords.length > 0 && <Polyline coordinates={routeCoords} strokeWidth={4} strokeColor="#4A90E2" />}
-  {driverLocation && (
-    <Marker
-      coordinate={driverLocation}
-      pinColor="blue"
-      title={driverLocation.name || 'Driver'}
-    />
-  )}
-</MapView>
-
+      description={`${driver.vehicle} • ${vehicleDetails.color} • ⭐ ${driver.rating}`}
+    >
+      {/* Custom marker icon based on vehicle type */}
+      <View style={{
+        backgroundColor: '#FFA500',
+        padding: 8,
+        borderRadius: 20,
+        borderWidth: 2,
+        borderColor: '#fff',
+      }}>
+        <Ionicons 
+          name={
+            vehicleDetails.vehicleType === 'sedan' ? 'car-sport' :
+            vehicleDetails.vehicleType === 'suv' ? 'car' :
+            vehicleDetails.vehicleType === 'van' ? 'bus' :
+            'car-outline'
+          } 
+          size={20} 
+          color="#fff" 
+        />
+      </View>
+    </Marker>
+  );
+   })}
+        </MapView>
       )}
 
-     <KeyboardAvoidingView
-  behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-  keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 80}
-  style={[
-  styles.bottomSheet,
-  collapsed ? { maxHeight: 120 } : { maxHeight: '50%' }
-]}
-
->
-  <View style={styles.sheetContainer}>
-    <ScrollView
-      keyboardShouldPersistTaps="handled"
-      showsVerticalScrollIndicator={false}
-      contentContainerStyle={{ paddingBottom: 30 }}
-    >
-     {distance && travelTime && (
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 80}
+        style={[
+          styles.bottomSheet,
+          collapsed ? { maxHeight: 120 } : { maxHeight: '50%' },
+        ]}
+      >
+        <View style={styles.sheetContainer}>
+          <ScrollView
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={{ paddingBottom: 30 }}
+          >
+           {distance && travelTime && price && (
   <View style={styles.infoRow}>
     <View style={styles.infoBox}>
       <Ionicons name="navigate-outline" size={18} color="#FFA500" />
@@ -393,127 +658,228 @@ const fetchNearbyDrivers = async () => {
       <Ionicons name="time-outline" size={18} color="#FFA500" />
       <Text style={styles.infoText}>{travelTime} min ETA</Text>
     </View>
+    <View style={styles.infoBox}>
+      <Ionicons name="cash-outline" size={18} color="#FFA500" />
+      <Text style={styles.infoText}>${price}</Text>
+    </View>
   </View>
 )}
 
 
-      <View style={styles.inputContainer}>
-        <View style={styles.locationRow}>
-          <TextInput
-            ref={pickupInputRef}
-            value={fromLocation}
-            onChangeText={(text) => onLocationChange(text, true)}
-            placeholder="Pickup Location"
-            style={styles.input}
-          />
-          <TouchableOpacity onPress={() => pickupInputRef.current?.focus()} style={styles.editIcon}>
-            <Ionicons name="create-outline" size={20} color={darkMode ? '#FFA500' : '#444'} />
-          </TouchableOpacity>
+            <View style={styles.inputContainer}>
+              <View style={styles.locationRow}>
+                <TextInput
+                  ref={pickupInputRef}
+                  value={fromLocation}
+                  onChangeText={(text) => onLocationChange(text, true)}
+                  placeholder="Pickup Location"
+                  style={styles.input}
+                />
+                <TouchableOpacity
+                  onPress={() => pickupInputRef.current?.focus()}
+                  style={styles.editIcon}
+                >
+                  <Ionicons
+                    name="create-outline"
+                    size={20}
+                    color={darkMode ? '#FFA500' : '#444'}
+                  />
+                </TouchableOpacity>
+              </View>
+
+              {showFromSuggestions && (
+                <FlatList
+                  data={fromSuggestions}
+                  keyExtractor={(item) => item.address}
+                  renderItem={({ item }) => renderSuggestion(item, true)}
+                  style={{ maxHeight: 150, marginBottom: 10 }}
+                  keyboardShouldPersistTaps="handled"
+                />
+              )}
+
+              <View style={styles.locationRow}>
+                <TextInput
+                  ref={dropoffInputRef}
+                  value={toLocation}
+                  onChangeText={(text) => onLocationChange(text, false)}
+                  placeholder="Dropoff Location"
+                  style={styles.input}
+                />
+                <TouchableOpacity
+                  onPress={() => dropoffInputRef.current?.focus()}
+                  style={styles.editIcon}
+                >
+                  <Ionicons
+                    name="create-outline"
+                    size={20}
+                    color={darkMode ? '#FFA500' : '#444'}
+                  />
+                </TouchableOpacity>
+              </View>
+
+              {showToSuggestions && (
+                <FlatList
+                  data={toSuggestions}
+                  keyExtractor={(item) => item.address}
+                  renderItem={({ item }) => renderSuggestion(item, false)}
+                  style={{ maxHeight: 150, marginBottom: 10 }}
+                  keyboardShouldPersistTaps="handled"
+                />
+              )}
+            </View>
+
+            <View style={styles.transportRow}>
+              {['taxi', 'bus', 'van'].map((type) => (
+                <TouchableOpacity
+                  key={type}
+                  style={[
+                    styles.transportOption,
+                    selectedTransport === type && styles.transportSelected,
+                  ]}
+                  onPress={() => setSelectedTransport(type)}
+                >
+                  <Ionicons
+                    name={
+                      type === 'taxi'
+                        ? 'car-sport'
+                        : type === 'bus'
+                        ? 'bus'
+                        : 'car-outline'
+                    }
+                    size={20}
+                    color="#fff"
+                  />
+                  <Text style={styles.transportText}>{type.toUpperCase()}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {loading && (
+              <ActivityIndicator color="#FFA500" style={{ marginVertical: 10 }} />
+            )}
+
+            <TouchableOpacity
+              style={styles.paymentButton}
+              onPress={() => setPaymentModalVisible(true)}
+            >
+              <MaterialIcons name="payment" size={24} color="#FFA500" />
+              <Text style={styles.paymentButtonText}>Payment</Text>
+              <Ionicons name="chevron-forward" size={24} color="#FFA500" />
+            </TouchableOpacity>
+
+            {paymentDone && (
+  <TouchableOpacity
+    style={[styles.paymentButton, { marginTop: 10, backgroundColor: '#FFA500' }]}
+    onPress={onConfirmOrder}
+    disabled={fetchingDrivers}
+  >
+    {fetchingDrivers ? (
+      <ActivityIndicator color="#fff" />
+    ) : (
+      <>
+        <MaterialIcons name="check-circle" size={24} color="#fff" />
+        <Text style={[styles.paymentButtonText, { color: '#fff' }]}>
+          Confirm Order
+        </Text>
+        <Ionicons name="chevron-forward" size={24} color="#fff" />
+      </>
+    )}
+  </TouchableOpacity>
+)}
+          </ScrollView>
         </View>
+      </KeyboardAvoidingView>
 
-        {showFromSuggestions && (
-          <FlatList
-            data={fromSuggestions}
-            keyExtractor={(item) => item.address}
-            renderItem={({ item }) => renderSuggestion(item, true)}
-            style={{ maxHeight: 150, marginBottom: 10 }}
-            keyboardShouldPersistTaps="handled"
-          />
-        )}
+      <Modal
+        visible={paymentModalVisible}
+        animationType="slide"
+        transparent={true}
+        onRequestClose={() => setPaymentModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContainer, darkMode && { backgroundColor: '#222' }]}>
+            <Text style={[styles.modalTitle, { color: darkMode ? '#FFA500' : '#000' }]}>Select Payment Method</Text>
 
-        <View style={styles.locationRow}>
-          <TextInput
-            ref={dropoffInputRef}
-            value={toLocation}
-            onChangeText={(text) => onLocationChange(text, false)}
-            placeholder="Dropoff Location"
-            style={styles.input}
-          />
-          <TouchableOpacity onPress={() => dropoffInputRef.current?.focus()} style={styles.editIcon}>
-            <Ionicons name="create-outline" size={20} color={darkMode ? '#FFA500' : '#444'} />
-          </TouchableOpacity>
+            {['cash', 'card'].map((method) => (
+              <TouchableOpacity
+                key={method}
+                style={[
+                  styles.paymentMethodOption,
+                  paymentMethod === method && styles.paymentMethodSelected,
+                  { marginVertical: 8 },
+                ]}
+                onPress={async () => {
+                  try {
+                    setPaymentMethod(method);
+                    setPaymentMethod(method);
+                    setPaymentDone(true); // 👈 Add this
+                    setPaymentModalVisible(false); 
+
+                    const rideId = await saveRideToFirestore();
+                    if (!rideId) return;
+
+                    if (method === 'card') {
+                      navigation.navigate('Main', {
+                        screen: 'Payments',
+                        params: {
+                          pickup,
+                          dropoff,
+                          rideId,
+                          price,
+                          distance,
+                          selectedTransport,
+                          paymentMethod: method,
+                        },
+                      });
+
+                      if (selectedTransport === 'bus' || selectedTransport === 'van') {
+                        setTimeout(() => {
+                          generateAndShareTicket();
+                        }, 1500);
+                      }
+                    } else {
+                      Alert.alert(
+                        'Cash Payment Selected',
+                        'Please pay the driver in person.'
+                      );
+
+                      if (selectedTransport === 'bus' || selectedTransport === 'van') {
+                        generateAndShareTicket();
+                      }
+                    }
+                  } catch (error) {
+                    console.error('Payment handling error:', error);
+                    Alert.alert('Error', 'Something went wrong during payment handling.');
+                  }
+                }}
+              >
+                <Ionicons
+                  name={method === 'cash' ? 'cash-outline' : 'card-outline'}
+                  size={22}
+                  color={paymentMethod === method ? '#fff' : '#FFA500'}
+                  style={{ marginRight: 10 }}
+                />
+                <Text
+                  style={[
+                    styles.paymentMethodText,
+                    paymentMethod === method && { color: '#fff' },
+                  ]}
+                >
+                  {method.toUpperCase()}
+                </Text>
+              </TouchableOpacity>
+            ))}
+
+            <TouchableOpacity
+              onPress={() => setPaymentModalVisible(false)}
+              style={[styles.modalButton, { backgroundColor: '#ccc', marginTop: 16 }]}
+            >
+              <Text>Cancel</Text>
+            </TouchableOpacity>
+          </View>
         </View>
+      </Modal>
 
-        {showToSuggestions && (
-          <FlatList
-            data={toSuggestions}
-            keyExtractor={(item) => item.address}
-            renderItem={({ item }) => renderSuggestion(item, false)}
-            style={{ maxHeight: 150, marginBottom: 10 }}
-            keyboardShouldPersistTaps="handled"
-          />
-        )}
-      </View>
-
-      <View style={styles.transportRow}>
-        {['taxi', 'bus', 'van'].map((type) => (
-          <TouchableOpacity
-            key={type}
-            style={[styles.transportOption, selectedTransport === type && styles.transportSelected]}
-            onPress={() => setSelectedTransport(type)}
-          >
-            <Ionicons
-              name={type === 'taxi' ? 'car-sport' : type === 'bus' ? 'bus' : 'car-outline'}
-              size={20}
-              color="#fff"
-            />
-            <Text style={styles.transportText}>{type.toUpperCase()}</Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
-      {loading && <ActivityIndicator color="#FFA500" style={{ marginVertical: 10 }} />}
-
-      <TouchableOpacity
-        style={styles.paymentButton}
-       onPress={async () => {
-  navigation.navigate('Main', {
-    screen: 'Payments',
-    params: {
-      pickup,
-      dropoff,
-      rideId: 'ride_123',
-      price,
-      distance,
-      selectedTransport,
-    },
-  });
-
-  // Simulate ticket generation only for bus or van
-  if (selectedTransport === 'bus' || selectedTransport === 'van') {
-    setTimeout(() => {
-      generateAndShareTicket();
-    }, 1500); // wait for payment screen to load before showing share dialog
-  }
-}}
-
-      >
-        <MaterialIcons name="payment" size={24} color="#FFA500" />
-        <Text style={styles.paymentButtonText}>Payment</Text>
-        <Ionicons name="chevron-forward" size={24} color="#FFA500" />
-      </TouchableOpacity>
-
-      <TouchableOpacity
-        style={[styles.paymentButton, { marginTop: 10, backgroundColor: '#FFA500' }]}
-        onPress={onConfirmOrder}
-        disabled={fetchingDrivers}
-      >
-        {fetchingDrivers ? (
-          <ActivityIndicator color="#fff" />
-        ) : (
-          <>
-            <MaterialIcons name="check-circle" size={24} color="#fff" />
-            <Text style={[styles.paymentButtonText, { color: '#fff' }]}>Confirm Order</Text>
-            <Ionicons name="chevron-forward" size={24} color="#fff" />
-          </>
-        )}
-      </TouchableOpacity>
-    </ScrollView>
-  </View>
-</KeyboardAvoidingView>
-
-
-      {/* Drivers selection modal */}
       <Modal
         visible={driversVisible}
         animationType="slide"
@@ -541,33 +907,29 @@ const fetchNearbyDrivers = async () => {
                 style={[styles.modalButton, { backgroundColor: '#FFA500' }]}
                 disabled={!selectedDriver}
                 onPress={() => {
-  Alert.alert('Driver Selected', `You selected ${selectedDriver?.name}. Proceed with booking.`);
-  setDriversVisible(false);
+                  Alert.alert('Driver Selected', `You selected ${selectedDriver?.name}.`);
+                  setDriversVisible(false);
 
-  // ✅ Show driver on map
-  setDriverLocation({
-    latitude: selectedDriver.latitude,
-    longitude: selectedDriver.longitude,
-    name: selectedDriver.name,
-  });
+                  setDriverLocation({
+                    latitude: selectedDriver.latitude,
+                    longitude: selectedDriver.longitude,
+                    name: selectedDriver.name,
+                  });
 
-  // ✅ Optionally update map region to fit both pickup and driver
-  if (pickup) {
-    const centerLat = (pickup.latitude + selectedDriver.latitude) / 2;
-    const centerLng = (pickup.longitude + selectedDriver.longitude) / 2;
-    const deltaLat = Math.abs(pickup.latitude - selectedDriver.latitude) * 1.5 || 0.05;
-    const deltaLng = Math.abs(pickup.longitude - selectedDriver.longitude) * 1.5 || 0.05;
-    setRegion({
-      latitude: centerLat,
-      longitude: centerLng,
-      latitudeDelta: deltaLat,
-      longitudeDelta: deltaLng,
-    });
-  }
-  setCollapsed(true);
-
-}}
-
+                  if (pickup) {
+                    const centerLat = (pickup.latitude + selectedDriver.latitude) / 2;
+                    const centerLng = (pickup.longitude + selectedDriver.longitude) / 2;
+                    const deltaLat = Math.abs(pickup.latitude - selectedDriver.latitude) * 1.5 || 0.05;
+                    const deltaLng = Math.abs(pickup.longitude - selectedDriver.longitude) * 1.5 || 0.05;
+                    setRegion({
+                      latitude: centerLat,
+                      longitude: centerLng,
+                      latitudeDelta: deltaLat,
+                      longitudeDelta: deltaLng,
+                    });
+                  }
+                  setCollapsed(true);
+                }}
               >
                 <Text style={{ color: '#fff' }}>Confirm</Text>
               </TouchableOpacity>
@@ -685,7 +1047,34 @@ sheetContainer: {
       fontSize: 16,
       fontWeight: '700',
       color: '#FFA500',
-    },
+    },  
+
+    paymentMethodRow: {
+  flexDirection: 'row',
+  justifyContent: 'space-around',
+  marginTop: 10,
+},
+
+paymentMethodOption: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  backgroundColor: '#FFF5E1',
+  paddingVertical: 10,
+  paddingHorizontal: 20,
+  borderRadius: 10,
+  borderWidth: 1,
+  borderColor: '#FFA500',
+},
+
+paymentMethodSelected: {
+  backgroundColor: '#FFA500',
+},
+
+paymentMethodText: {
+  marginLeft: 8,
+  fontWeight: '600',
+  color: '#FFA500',
+},
 
     // Modal styles
     modalOverlay: {
@@ -711,27 +1100,65 @@ sheetContainer: {
       marginBottom: 15,
       textAlign: 'center',
     },
-    driverItem: {
-      padding: 12,
-      borderBottomWidth: 1,
-      borderBottomColor: '#ddd',
-      borderRadius: 8,
-      marginVertical: 4,
-      backgroundColor: '#f7f7f7',
-    },
-    driverItemSelected: {
-      backgroundColor: '#FFA500',
-    },
-    driverName: {
-      fontSize: 16,
-      fontWeight: '600',
-      color: '#000',
-    },
-    driverDetails: {
-      fontSize: 14,
-      color: '#555',
-      marginTop: 4,
-    },
+   driverItem: {
+    padding: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: darkMode ? '#444' : '#ddd',
+    borderRadius: 12,
+    marginVertical: 6,
+    backgroundColor: darkMode ? '#333' : '#f9f9f9',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 2,
+  },
+  
+  driverItemSelected: {
+    backgroundColor: '#FFA500',
+    borderColor: '#FF8C00',
+  },
+
+  driverName: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: darkMode ? '#fff' : '#000',
+  },
+
+  driverRating: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: darkMode ? '#fff' : '#666',
+    marginLeft: 4,
+  },
+
+  vehicleMain: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: darkMode ? '#FFA500' : '#333',
+    marginTop: 2,
+  },
+
+  vehicleDetails: {
+    fontSize: 14,
+    color: darkMode ? '#ccc' : '#666',
+    fontWeight: '500',
+  },
+
+  vehicleType: {
+    fontSize: 12,
+    color: darkMode ? '#ccc' : '#666',
+    marginLeft: 4,
+    fontWeight: '500',
+    textTransform: 'uppercase',
+  },
+
+  // Update existing driverDetails style (keep for backward compatibility)
+  driverDetails: {
+    fontSize: 14,
+    color: '#555',
+    marginTop: 4,
+  },
     modalButtonsRow: {
       flexDirection: 'row',
       justifyContent: 'space-between',
@@ -763,7 +1190,6 @@ infoRow: {
   flexDirection: 'row',
   justifyContent: 'center',
   marginBottom: 12,
-  gap: 20, // use marginRight on child views if your RN version doesn't support gap
 },
 
 infoBox: {

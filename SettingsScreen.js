@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -10,15 +10,52 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { deleteUser } from 'firebase/auth';
-import { auth } from './firebaseConfig';
+import { auth, db } from './firebaseConfig';
 import { useTheme } from './ThemeContext';
+import { doc, getDoc } from 'firebase/firestore';
 
 export default function SettingsScreen({ navigation }) {
-  const { darkMode, toggleTheme } = useTheme(); // ✅ use global theme
+  const { darkMode, toggleTheme } = useTheme();
 
-  const [language, setLanguage] = useState('English');
-  const [currency, setCurrency] = useState('USD');
-  const [preferredRide, setPreferredRide] = useState('Car');
+  // User profile state
+  const [profile, setProfile] = useState({
+    firstname: '',
+    email: '',
+    role: '',
+  });
+
+  // Load user profile from Firebase Auth and Firestore
+  useEffect(() => {
+    const loadProfile = async () => {
+      try {
+        const user = auth.currentUser;
+        if (!user) {
+          navigation.reset({ index: 0, routes: [{ name: 'SignIn' }] });
+          return;
+        }
+
+        const email = user.email || '';
+
+        // Fetch firstname and role from Firestore users collection
+        const userDocRef = doc(db, 'users', user.uid);
+        const userDocSnap = await getDoc(userDocRef);
+
+        let firstname = '';
+        let role = '';
+        if (userDocSnap.exists()) {
+          const userData = userDocSnap.data();
+          firstname = userData.firstname || '';
+          role = userData.role || '';
+        }
+
+        setProfile({ firstname, email, role });
+      } catch (error) {
+        Alert.alert('Error', 'Failed to load profile info.');
+      }
+    };
+
+    loadProfile();
+  }, [navigation]);
 
   const handleLogout = () => {
     Alert.alert('Logout', 'Are you sure you want to logout?', [
@@ -51,7 +88,7 @@ export default function SettingsScreen({ navigation }) {
     ]);
   };
 
-  const styles = getStyles(darkMode); // 🎨 dynamic styling
+  const styles = getStyles(darkMode);
 
   return (
     <ScrollView style={styles.container}>
@@ -60,10 +97,10 @@ export default function SettingsScreen({ navigation }) {
       {/* Profile Info */}
       <View style={styles.profileBox}>
         <Ionicons name="person-circle-outline" size={60} color={darkMode ? '#fff' : '#333'} />
-        <View>
-          <Text style={styles.profileName}>Jedidah Pam</Text>
-          <Text style={styles.profileEmail}>jedidahpam04@gmail.com</Text>
-          <Text style={styles.profileRole}>Rider</Text>
+        <View style={{ marginLeft: 12 }}>
+          <Text style={styles.profileName}>{profile.firstname || 'Unnamed User'}</Text>
+          <Text style={styles.profileEmail}>{profile.email || 'No email'}</Text>
+          <Text style={styles.profileRole}>{profile.role || 'Rider'}</Text>
         </View>
       </View>
 
@@ -73,24 +110,6 @@ export default function SettingsScreen({ navigation }) {
         label="Dark Mode" 
         value={darkMode} 
         onValueChange={toggleTheme} 
-        styles={styles} 
-      />
-      <SettingsSelector 
-        label="Language" 
-        value={language} 
-        onPress={() => setLanguage(language === 'English' ? 'Français' : 'English')} 
-        styles={styles} 
-      />
-      <SettingsSelector 
-        label="Currency" 
-        value={currency} 
-        onPress={() => setCurrency(currency === 'USD' ? 'NGN' : 'USD')} 
-        styles={styles} 
-      />
-      <SettingsSelector 
-        label="Preferred Ride Type" 
-        value={preferredRide} 
-        onPress={() => setPreferredRide(preferredRide === 'Car' ? 'Bike' : 'Car')} 
         styles={styles} 
       />
 
@@ -121,7 +140,6 @@ export default function SettingsScreen({ navigation }) {
   );
 }
 
-// ✅ Fixed: Pass styles as props to child components
 function SettingsOption({ icon, label, onPress, styles, darkMode }) {
   return (
     <TouchableOpacity style={styles.optionItem} onPress={onPress}>
@@ -132,7 +150,6 @@ function SettingsOption({ icon, label, onPress, styles, darkMode }) {
   );
 }
 
-// ✅ Fixed: Pass styles as props
 function SettingsToggle({ label, value, onValueChange, styles }) {
   return (
     <View style={styles.optionItem}>
@@ -142,18 +159,6 @@ function SettingsToggle({ label, value, onValueChange, styles }) {
   );
 }
 
-// ✅ Fixed: Pass styles as props
-function SettingsSelector({ label, value, onPress, styles }) {
-  return (
-    <TouchableOpacity style={styles.optionItem} onPress={onPress}>
-      <Text style={styles.optionText}>{label}</Text>
-      <Text style={{ color: '#aaa' }}>{value}</Text>
-      <Ionicons name="chevron-forward" size={18} color="#888" />
-    </TouchableOpacity>
-  );
-}
-
-// 🔁 Styles based on dark mode
 const getStyles = (darkMode) =>
   StyleSheet.create({
     container: {

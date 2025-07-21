@@ -11,14 +11,11 @@ import {
   ScrollView,
   SafeAreaView,
 } from 'react-native';
-import { auth, storage } from './firebaseConfig'; // You still use firebase storage SDK for images
+import { auth, storage, db } from './firebaseConfig'; // Add db import
+import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 import * as ImagePicker from 'expo-image-picker';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { useTheme } from './ThemeContext';
-
-const FIRESTORE_API_KEY = 'YOUR_FIRESTORE_API_KEY'; // Replace with your actual key
-const PROJECT_ID = 'local-transport-booking-app'; // Your Firebase project ID
-const DATABASE_URL = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents`;
 
 export default function DriverProfile() {
   const { darkMode } = useTheme();
@@ -41,76 +38,76 @@ export default function DriverProfile() {
     profilePicUrl: '',
   });
 
-  // Fetch driver profile from Firestore REST API
- const fetchProfile = async () => {
-  if (!userId) return;
-  setLoading(true);
-  try {
-    const res = await fetch(`${DATABASE_URL}/drivers/${userId}?key=${FIRESTORE_API_KEY}`);
-    if (!res.ok) {
-      if (res.status === 404) {
+  // Fetch driver profile using Firebase SDK
+  const fetchProfile = async () => {
+    if (!userId) return;
+    setLoading(true);
+    try {
+      const docRef = doc(db, 'drivers', userId);
+      const docSnap = await getDoc(docRef);
+      
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        const firstname = data.firstname || '';
+        const lastname = data.lastname || '';
+        
+        setProfile({
+          fullName: `${firstname} ${lastname}`.trim(),
+          email: data.email || auth.currentUser.email || '',
+          phone: data.phone || '',
+          vehicleMake: data.vehicleInfo?.make || '',
+          vehicleModel: data.vehicleInfo?.model || '',
+          vehiclePlate: data.vehicleInfo?.plateNumber || '',
+          licenseNumber: data.licenseNumber || '',
+          licenseExpiry: data.licenseExpiry || '',
+          profilePicUrl: data.profilePicUrl || '',
+        });
+      } else {
+        // Document doesn't exist, create default profile
         await createDefaultProfile();
-        return;
       }
-      throw new Error(`Failed to fetch profile: ${res.status}`);
+    } catch (error) {
+      console.error('Fetch profile error:', error);
+      Alert.alert('Error', 'Failed to load profile data.');
+    } finally {
+      setLoading(false);
     }
-    const data = await res.json();
-    const fields = data.fields || {};
-
-    const vehicleInfo = fields.vehicleInfo?.mapValue?.fields || {};
-
-   const firstname = fields.firstname?.stringValue || '';
-const lastname = fields.lastname?.stringValue || '';
-
-setProfile({
-  fullName: `${firstname} ${lastname}`.trim(),
-  email: fields.email?.stringValue || auth.currentUser.email || '',
-  phone: fields.phone?.stringValue || '',
-  vehicleMake: vehicleInfo.make?.stringValue || '',
-  vehicleModel: vehicleInfo.model?.stringValue || '',
-  vehiclePlate: vehicleInfo.plateNumber?.stringValue || '',
-  licenseNumber: fields.licenseNumber?.stringValue || '',
-  licenseExpiry: fields.licenseExpiry?.stringValue || '',
-  profilePicUrl: fields.profilePicUrl?.stringValue || '',
-});
-
-  } catch (error) {
-    console.error('Fetch profile error:', error);
-    Alert.alert('Error', 'Failed to load profile data.');
-  } finally {
-    setLoading(false);
-  }
-};
-
+  };
 
   // Create default empty profile doc for new driver
   const createDefaultProfile = async () => {
     try {
-      const defaultDoc = {
-        fields: {
-          fullName: { stringValue: '' },
-          email: { stringValue: auth.currentUser.email || '' },
-          phone: { stringValue: '' },
-          vehicleMake: { stringValue: '' },
-          vehicleModel: { stringValue: '' },
-          vehiclePlate: { stringValue: '' },
-          licenseNumber: { stringValue: '' },
-          licenseExpiry: { stringValue: '' },
-          profilePicUrl: { stringValue: '' },
+      const docRef = doc(db, 'drivers', userId);
+      const defaultData = {
+        firstname: '',
+        lastname: '',
+        email: auth.currentUser.email || '',
+        phone: '',
+        vehicleInfo: {
+          make: '',
+          model: '',
+          plateNumber: '',
         },
+        licenseNumber: '',
+        licenseExpiry: '',
+        profilePicUrl: '',
+        createdAt: new Date(),
       };
 
-      const res = await fetch(`${DATABASE_URL}/drivers/${userId}?key=${FIRESTORE_API_KEY}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(defaultDoc),
+      await setDoc(docRef, defaultData);
+      
+      // Update local state
+      setProfile({
+        fullName: '',
+        email: auth.currentUser.email || '',
+        phone: '',
+        vehicleMake: '',
+        vehicleModel: '',
+        vehiclePlate: '',
+        licenseNumber: '',
+        licenseExpiry: '',
+        profilePicUrl: '',
       });
-
-      if (!res.ok) {
-        throw new Error('Failed to create default profile');
-      }
-      // After creating, fetch profile to update UI
-      fetchProfile();
     } catch (error) {
       console.error('Create default profile error:', error);
       Alert.alert('Error', 'Failed to create profile.');
@@ -125,63 +122,44 @@ setProfile({
     setProfile(prev => ({ ...prev, [field]: value }));
   };
 
-  // Save profile to Firestore REST API
- const saveProfile = async () => {
-  if (!userId) return;
-  setSaving(true);
-  try {
-    // Split fullName into firstname and lastname
-const nameParts = profile.fullName.trim().split(' ');
-const firstname = nameParts.shift() || '';
-const lastname = nameParts.join(' ') || '';
+  // Save profile using Firebase SDK
+  const saveProfile = async () => {
+    if (!userId) return;
+    setSaving(true);
+    try {
+      // Split fullName into firstname and lastname
+      const nameParts = profile.fullName.trim().split(' ');
+      const firstname = nameParts.shift() || '';
+      const lastname = nameParts.join(' ') || '';
 
-const body = {
-  fields: {
-    firstname: { stringValue: firstname },
-    lastname: { stringValue: lastname },
-    email: { stringValue: profile.email },
-    phone: { stringValue: profile.phone },
-    licenseNumber: { stringValue: profile.licenseNumber },
-    licenseExpiry: { stringValue: profile.licenseExpiry },
-    profilePicUrl: { stringValue: profile.profilePicUrl },
-    vehicleInfo: {
-      mapValue: {
-        fields: {
-          make: { stringValue: profile.vehicleMake },
-          model: { stringValue: profile.vehicleModel },
-          plateNumber: { stringValue: profile.vehiclePlate },
-        }
-      }
+      const docRef = doc(db, 'drivers', userId);
+      const updateData = {
+        firstname,
+        lastname,
+        email: profile.email,
+        phone: profile.phone,
+        licenseNumber: profile.licenseNumber,
+        licenseExpiry: profile.licenseExpiry,
+        profilePicUrl: profile.profilePicUrl,
+        vehicleInfo: {
+          make: profile.vehicleMake,
+          model: profile.vehicleModel,
+          plateNumber: profile.vehiclePlate,
+        },
+        updatedAt: new Date(),
+      };
+
+      await updateDoc(docRef, updateData);
+      Alert.alert('Success', 'Profile saved!');
+    } catch (error) {
+      console.error('Save failed:', error);
+      Alert.alert('Error', 'Failed to save profile.');
+    } finally {
+      setSaving(false);
     }
-  }
-};
+  };
 
-
-    const updateMaskFields = Object.keys(body.fields);
-
-    const url = `${DATABASE_URL}/drivers/${userId}?key=${FIRESTORE_API_KEY}&updateMask.fieldPaths=${updateMaskFields.join('&updateMask.fieldPaths=')}`;
-
-    const res = await fetch(url, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-      const errorText = await res.text();
-      console.error('Save profile error:', errorText);
-      throw new Error(`Failed to save profile: ${res.status}`);
-    }
-    Alert.alert('Success', 'Profile saved!');
-  } catch (error) {
-    console.error('Save failed:', error);
-    Alert.alert('Error', 'Failed to save profile.');
-  } finally {
-    setSaving(false);
-  }
-};
-
-  // Image picker & upload logic remains same, uploading to Firebase Storage
+  // Image picker & upload logic (unchanged)
   const pickImage = async () => {
     const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permissionResult.granted) {

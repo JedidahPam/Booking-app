@@ -12,26 +12,25 @@ import { Ionicons } from '@expo/vector-icons';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 
-export default function SettingsPanel({ visible, onClose, children }) {
+export default function SettingsPanel({ visible, onClose, children, darkMode = false }) {
   const slideAnim = useRef(new Animated.Value(SCREEN_WIDTH)).current;
   const [isMounted, setIsMounted] = useState(visible);
 
   useEffect(() => {
     if (visible) {
-      setIsMounted(true); // Mount panel first
+      setIsMounted(true);
       Animated.timing(slideAnim, {
         toValue: 0,
         duration: 300,
         useNativeDriver: true,
       }).start();
     } else {
-      // Slide out animation
       Animated.timing(slideAnim, {
         toValue: SCREEN_WIDTH,
         duration: 300,
         useNativeDriver: true,
       }).start(() => {
-        setIsMounted(false); // Unmount after animation
+        setIsMounted(false);
       });
     }
   }, [visible]);
@@ -40,16 +39,19 @@ export default function SettingsPanel({ visible, onClose, children }) {
 
   return (
     <TouchableWithoutFeedback onPress={onClose}>
-      <View style={styles.overlay}>
+      <View style={[styles.overlay, { backgroundColor: darkMode ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.5)' }]}>
         <Animated.View
           style={[
             styles.panel,
-            { transform: [{ translateX: slideAnim }] },
+            {
+              transform: [{ translateX: slideAnim }],
+              backgroundColor: darkMode ? '#121212' : '#fff',
+            },
           ]}
         >
           <SafeAreaView style={{ flex: 1 }}>
             <TouchableOpacity style={styles.closeButton} onPress={onClose}>
-              <Ionicons name="close" size={28} color="#fff" />
+              <Ionicons name="close" size={28} color={darkMode ? '#fff' : '#000'} />
             </TouchableOpacity>
 
             <View style={styles.content}>
@@ -66,7 +68,6 @@ const styles = StyleSheet.create({
   overlay: {
     position: 'absolute',
     top: 0, left: 0, right: 0, bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.5)',
     zIndex: 1000,
     elevation: 1000,
   },
@@ -76,9 +77,9 @@ const styles = StyleSheet.create({
     right: 0,
     width: SCREEN_WIDTH * 0.75,
     height: '100%',
-    backgroundColor:'#1a1a1a',
     paddingTop: 40,
     paddingHorizontal: 20,
+    // backgroundColor is now set dynamically
   },
   closeButton: {
     position: 'absolute',

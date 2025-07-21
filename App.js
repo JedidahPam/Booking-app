@@ -4,10 +4,14 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons } from '@expo/vector-icons';
-import { ThemeProvider } from './ThemeContext';
 import Toast from 'react-native-toast-message';
+import * as Notifications from 'expo-notifications';
+import * as Device from 'expo-device';
+import { Platform } from 'react-native';
+
+import { ThemeProvider } from './ThemeContext';
 import { onAuthStateChanged } from 'firebase/auth';
-import { doc, getDoc, onSnapshot } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot, updateDoc } from 'firebase/firestore';
 import { auth, db } from './firebaseConfig';
 
 // Screens
@@ -28,7 +32,7 @@ import DriverRegistration from './DriverRegistration';
 import DriverSettings from './DriverSettings';
 import DriverHistory from './DriverHistory';
 import AdminDashboard from './AdminDashboard';
-
+import ChatScreen from './ChatScreen';
 const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
 
@@ -86,64 +90,126 @@ export default function App() {
   const [initialScreen, setInitialScreen] = useState('SignIn');
 
   useEffect(() => {
-    const unsubscribeAuth = onAuthStateChanged(auth, async (user) => {
-      if (user) {
-       const userData = userDoc.data();
-if (!userData) return setInitialScreen('SignIn');
-
-if (userData.isAdmin || userData.role === 'admin') {
-  setInitialScreen('AdminDashboard');
-} else if (userData.role === 'driver') {
-  setInitialScreen('DriverMain');
-} else {
-  setInitialScreen('Main');
-}
-
-        setInitialScreen(isAdmin ? 'AdminDashboard' : 'Main');
-      } else {
-        setInitialScreen('SignIn');
+    const registerForPushNotificationsAsync = async () => {
+      if (!Device.isDevice) return alert('Use a physical device for push notifications.');
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
       }
-    });
+      if (finalStatus !== 'granted') return;
 
-    return () => unsubscribeAuth();
+      const token = (await Notifications.getExpoPushTokenAsync()).data;
+      console.log('Expo Push Token:', token);
+
+      if (auth.currentUser) {
+        await updateDoc(doc(db, 'users', auth.currentUser.uid), {
+          expoPushToken: token,
+        });
+      }
+
+      if (Platform.OS === 'android') {
+        Notifications.setNotificationChannelAsync('default', {
+          name: 'default',
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: '#FFA500',
+        });
+      }
+    };
+
+    registerForPushNotificationsAsync();
   }, []);
 
   useEffect(() => {
-    const rideId = 'current_ride_id_here'; // Replace with actual logic
+  const user = auth.currentUser;
+  if (!user) return;
+
+  const userRef = doc(db, 'users', user.uid);
+  let unsubscribeRide = null;
+
+  const fetchRideListener = async () => {
+    const userSnap = await getDoc(userRef);
+    const userData = userSnap.data();
+    const rideId = userData?.currentRideId;
+
     if (!rideId) return;
 
-    const unsubscribe = onSnapshot(doc(db, 'rides', rideId), (docSnapshot) => {
+    const rideRef = doc(db, 'rides', rideId);
+
+    unsubscribeRide = onSnapshot(rideRef, async (docSnapshot) => {
       const data = docSnapshot.data();
       if (!data?.status) return;
 
-      let message = '';
+      let title = '';
+      let body = '';
+
       switch (data.status) {
         case 'accepted':
-          message = 'Your ride has been accepted!';
+          title = 'Ride Accepted';
+          body = 'Your ride has been accepted by a driver.';
           break;
         case 'en_route':
-          message = 'Driver is on the way!';
+          title = 'Driver En Route';
+          body = 'Your driver is on the way to pick you up.';
           break;
         case 'started':
-          message = 'Your ride has started!';
+          title = 'Ride Started';
+          body = 'Your ride has started.';
           break;
         case 'completed':
-          message = 'Ride completed. Thank you!';
+          title = 'Ride Completed';
+          body = 'Thank you for riding with us.';
           break;
         default:
           return;
       }
 
+      // ✅ Show in-app toast
       Toast.show({
         type: 'info',
-        text1: 'Ride Update',
-        text2: message,
+        text1: title,
+        text2: body,
         position: 'top',
       });
-    });
 
-    return () => unsubscribe();
-  }, []);
+      // ✅ Write to Firestore
+      await addDoc(collection(db, 'notifications'), {
+        userId: user.uid,
+        title,
+        body,
+        timestamp: serverTimestamp(),
+        read: false,
+      });
+
+      // ✅ Send Expo Push Notification
+      const token = userData?.expoPushToken;
+      if (token) {
+        await fetch('https://exp.host/--/api/v2/push/send', {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            to: token,
+            title,
+            body,
+            sound: 'default',
+          }),
+        });
+      }
+    });
+  };
+
+  fetchRideListener();
+
+  return () => {
+    if (unsubscribeRide) unsubscribeRide();
+  };
+}, []);
+
 
   return (
     <ThemeProvider>
@@ -169,6 +235,7 @@ if (userData.isAdmin || userData.role === 'admin') {
           <Stack.Screen name="NotificationsScreen" component={NotificationsScreen} options={{ title: 'Notifications' }} />
           <Stack.Screen name="DriverHistory" component={DriverHistory} options={{ title: 'Trip History' }} />
           <Stack.Screen name="ChangePasswordScreen" component={ChangePasswordScreen} options={{ title: 'Change Password' }} />
+          <Stack.Screen name="Chat" component={ChatScreen} />
         </Stack.Navigator>
         <Toast />
       </NavigationContainer>

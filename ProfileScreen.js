@@ -16,7 +16,7 @@ const DATABASE_URL = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}
 const CLOUDINARY_URL = 'https://api.cloudinary.com/v1_1/dgkethsxx/image/upload';
 const CLOUDINARY_UPLOAD_PRESET = 'profile_images';
 
-const auth = getAuth(); // Make sure firebaseApp is initialized elsewhere
+const auth = getAuth();
 const getUserDocId = () => auth.currentUser?.uid || null;
 
 export default function ProfileScreen() {
@@ -40,22 +40,52 @@ export default function ProfileScreen() {
     },
   });
 
-  // Fetch profile from Firestore REST API
+  // Get the current user's ID token for authentication
+  const getAuthToken = async () => {
+    try {
+      const user = auth.currentUser;
+      if (user) {
+        return await user.getIdToken();
+      }
+      return null;
+    } catch (error) {
+      console.error('Error getting auth token:', error);
+      return null;
+    }
+  };
+
+  // Fetch profile from Firestore REST API with authentication
   const fetchProfile = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${DATABASE_URL}/users/${userDocId}?key=${FIRESTORE_API_KEY}`);
+      const token = await getAuthToken();
+      if (!token) {
+        throw new Error('User not authenticated');
+      }
+
+      const headers = {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      };
+
+      const res = await fetch(`${DATABASE_URL}/users/${userDocId}?key=${FIRESTORE_API_KEY}`, {
+        method: 'GET',
+        headers,
+      });
       
       if (!res.ok) {
         if (res.status === 404) {
           await createDefaultProfile();
           return;
         }
-        throw new Error(`Failed to fetch profile: ${res.status}`);
+        const errorText = await res.text();
+        console.error('Fetch error response:', errorText);
+        throw new Error(`Failed to fetch profile: ${res.status} - ${errorText}`);
       }
       
       const data = await res.json();
       const fields = data.fields || {};
+      
       
       setProfile({
         firstname: fields.firstname?.stringValue || '',
@@ -71,7 +101,7 @@ export default function ProfileScreen() {
       });
     } catch (error) {
       console.error('Fetch profile error:', error);
-      Alert.alert('Error', 'Failed to load profile. Please try again.');
+      Alert.alert('Error', `Failed to load profile: ${error.message}`);
     } finally {
       setLoading(false);
     }
@@ -79,6 +109,11 @@ export default function ProfileScreen() {
 
   const createDefaultProfile = async () => {
     try {
+      const token = await getAuthToken();
+      if (!token) {
+        throw new Error('User not authenticated');
+      }
+
       const defaultProfile = {
         fields: {
           firstname: { stringValue: '' },
@@ -98,31 +133,47 @@ export default function ProfileScreen() {
         },
       };
 
+      const headers = {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      };
+
       const res = await fetch(`${DATABASE_URL}/users/${userDocId}?key=${FIRESTORE_API_KEY}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(defaultProfile),
       });
 
       if (!res.ok) {
-        throw new Error('Failed to create default profile');
+        const errorText = await res.text();
+        console.error('Create profile error response:', errorText);
+        throw new Error(`Failed to create default profile: ${res.status} - ${errorText}`);
       } else {
         // After creation, fetch profile again to update UI
         fetchProfile();
       }
     } catch (error) {
       console.error('Create default profile error:', error);
-      Alert.alert('Error', 'Failed to create profile. Please try again.');
+      Alert.alert('Error', `Failed to create profile: ${error.message}`);
     }
   };
 
   useEffect(() => {
-    fetchProfile();
-  }, []);
+    if (userDocId) {
+      fetchProfile();
+    } else {
+      Alert.alert('Error', 'User not authenticated. Please log in again.');
+    }
+  }, [userDocId]);
 
   const saveProfile = async (profileData = profile) => {
     setSaving(true);
     try {
+      const token = await getAuthToken();
+      if (!token) {
+        throw new Error('User not authenticated');
+      }
+
       const body = {
         fields: {
           firstname: { stringValue: profileData.firstname },
@@ -149,22 +200,27 @@ export default function ProfileScreen() {
 
       const url = `${DATABASE_URL}/users/${userDocId}?key=${FIRESTORE_API_KEY}&updateMask.fieldPaths=${updateMaskFields.join('&updateMask.fieldPaths=')}`;
 
+      const headers = {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      };
+
       const res = await fetch(url, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(body),
       });
 
       if (!res.ok) {
         const errorText = await res.text();
-        console.error('Server response:', errorText);
-        throw new Error(`Failed to update profile: ${res.status}`);
+        console.error('Save profile error response:', errorText);
+        throw new Error(`Failed to update profile: ${res.status} - ${errorText}`);
       }
 
       Alert.alert('Success', 'Profile updated successfully!');
     } catch (error) {
       console.error('Save profile error:', error);
-      Alert.alert('Error', 'Failed to save profile. Please try again.');
+      Alert.alert('Error', `Failed to save profile: ${error.message}`);
     } finally {
       setSaving(false);
     }
@@ -303,31 +359,29 @@ export default function ProfileScreen() {
           <Text style={styles.title}>Profile</Text>
         </View>
 
-       <TouchableOpacity 
-  onPress={chooseImageSource} 
-  style={styles.imagePicker}
-  disabled={uploadingImage}
->
-  {uploadingImage ? (
-  <View style={styles.profileImageContainer}>
-    <ActivityIndicator size="large" color="#FFA500" />
-  </View>
-) : profile.profileImage ? (
-  <Image
-    key={profile.profileImage}
-    source={{ uri: profile.profileImage, cache: 'reload' }}
-    style={styles.profileImage}
-  />
-) : (
-  <Ionicons name="person-circle-outline" size={120} color={darkMode ? '#888' : '#ccc'} />
-)}
+        <TouchableOpacity 
+          onPress={chooseImageSource} 
+          style={styles.imagePicker}
+          disabled={uploadingImage}
+        >
+          {uploadingImage ? (
+            <View style={styles.profileImageContainer}>
+              <ActivityIndicator size="large" color="#FFA500" />
+            </View>
+          ) : profile.profileImage ? (
+            <Image
+              key={profile.profileImage}
+              source={{ uri: profile.profileImage, cache: 'reload' }}
+              style={styles.profileImage}
+            />
+          ) : (
+            <Ionicons name="person-circle-outline" size={120} color={darkMode ? '#888' : '#ccc'} />
+          )}
 
-
-  <Text style={styles.changePhotoText}>
-    {uploadingImage ? 'Uploading...' : 'Tap to change photo'}
-  </Text>
-</TouchableOpacity>
-
+          <Text style={styles.changePhotoText}>
+            {uploadingImage ? 'Uploading...' : 'Tap to change photo'}
+          </Text>
+        </TouchableOpacity>
 
         {/* Basic Information */}
         {[
@@ -476,14 +530,13 @@ const createStyles = (darkMode) => StyleSheet.create({
     marginTop: 10,
   },
   profileImageContainer: {
-  width: 120,
-  height: 120,
-  borderRadius: 60,
-  justifyContent: 'center',
-  alignItems: 'center',
-  borderWidth: 2,
-  borderColor: darkMode ? '#444' : '#ddd',
-  backgroundColor: darkMode ? '#2a2a2a' : '#f5f5f5',
-},
-
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: darkMode ? '#444' : '#ddd',
+    backgroundColor: darkMode ? '#2a2a2a' : '#f5f5f5',
+  },
 });

@@ -12,25 +12,27 @@ import {
   Modal,
   Pressable,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { collection, query, where, onSnapshot } from 'firebase/firestore';
 import { db, auth } from './firebaseConfig';
 import * as Location from 'expo-location';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import haversine from 'haversine-distance';
 
-
 const windowWidth = Dimensions.get('window').width;
 const API_KEY = 'AIzaSyAZf-KMgaokOF-PVhxgXG64bxWK28_h9-0';
 const RIDE_DOCUMENT_BASE_URL = `https://firestore.googleapis.com/v1/projects/local-transport-booking-app/databases/(default)/documents/rides`;
 
-export default function DriverTrips() {
+export default function DriverTrips({ navigation }) {
   const [trips, setTrips] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expandedMapVisible, setExpandedMapVisible] = useState(false);
   const [expandedMapPickup, setExpandedMapPickup] = useState(null);
   const [expandedMapDropoff, setExpandedMapDropoff] = useState(null);
   const [driverLocation, setDriverLocation] = useState(null);
+  const [availableRidesCount, setAvailableRidesCount] = useState(0);
   const locationSubscription = useRef(null);
+  const availableRidesUnsubscribeRef = useRef(null);
 
   useEffect(() => {
     if (expandedMapVisible) {
@@ -49,7 +51,6 @@ export default function DriverTrips() {
         );
       })();
     } else {
-      // Stop tracking when modal closes
       if (locationSubscription.current) {
         locationSubscription.current.remove();
         locationSubscription.current = null;
@@ -57,6 +58,70 @@ export default function DriverTrips() {
       setDriverLocation(null);
     }
   }, [expandedMapVisible]);
+
+  useEffect(() => {
+    subscribeToAvailableRides();
+    return () => {
+      if (availableRidesUnsubscribeRef.current) {
+        availableRidesUnsubscribeRef.current();
+      }
+    };
+  }, []);
+
+  const subscribeToAvailableRides = async () => {
+    try {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        console.log('Location permission denied for available rides count');
+        return;
+      }
+
+      const location = await Location.getCurrentPositionAsync({});
+      const coords = {
+        latitude: location.coords.latitude,
+        longitude: location.coords.longitude,
+      };
+
+      const availableRidesQuery = query(
+        collection(db, 'rides'),
+        where('status', '==', 'pending')
+      );
+
+      availableRidesUnsubscribeRef.current = onSnapshot(
+        availableRidesQuery,
+        (snapshot) => {
+          let nearbyCount = 0;
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data();
+
+            let pickupLocation = data.pickupLocation;
+            if (data.pickup && data.pickup.latitude) {
+              pickupLocation = data.pickup;
+            }
+
+            if (pickupLocation && pickupLocation.latitude) {
+              const rideCoords = {
+                latitude: pickupLocation.latitude,
+                longitude: pickupLocation.longitude,
+              };
+              const distanceKm = haversine(coords, rideCoords) / 1000;
+
+              if (distanceKm <= 30) {
+                nearbyCount++;
+              }
+            }
+          });
+
+          setAvailableRidesCount(nearbyCount);
+        },
+        (error) => {
+          console.error('Error fetching available rides count:', error);
+        }
+      );
+    } catch (error) {
+      console.error('Error setting up available rides subscription:', error);
+    }
+  };
 
   const openExpandedMap = (pickupLoc, dropoffLoc) => {
     if (!pickupLoc || !dropoffLoc) return;
@@ -164,362 +229,431 @@ export default function DriverTrips() {
       }
       Alert.alert('Success', 'Ride updated successfully.');
     } catch (error) {
-      console.error(error);
+      console.error('Update ride error:', error);
       Alert.alert('Error', 'Failed to update ride');
     }
   };
 
-  const handleStartRide = async (ride) => {
+  const handleStartTrip = async (rideId) => {
     const coords = await getCurrentLocation();
     if (!coords) return;
-
-    const startLocation = {
-      mapValue: {
-        fields: {
-          latitude: { doubleValue: coords.latitude },
-          longitude: { doubleValue: coords.longitude },
-        },
-      },
-    };
 
     const updateFields = {
       status: { stringValue: 'in_progress' },
-      startLocation,
       startTime: { timestampValue: new Date().toISOString() },
-    };
-
-    updateRide(ride.id, updateFields, ['status', 'startLocation', 'startTime']);
-  };
-
-  const handleCompleteRide = async (ride) => {
-    const coords = await getCurrentLocation();
-    if (!coords) return;
-
-    const finalFare = 16.75;
-    const distance = 5.2;
-
-    const endLocation = {
-      mapValue: {
-        fields: {
-          latitude: { doubleValue: coords.latitude },
-          longitude: { doubleValue: coords.longitude },
+      driverLocation: {
+        mapValue: {
+          fields: {
+            latitude: { doubleValue: coords.latitude },
+            longitude: { doubleValue: coords.longitude },
+          },
         },
       },
     };
 
+    await updateRide(rideId, updateFields, ['status', 'startTime', 'driverLocation']);
+  };
+
+  const handleCompleteTrip = async (rideId) => {
+    const coords = await getCurrentLocation();
+    if (!coords) return;
+
     const updateFields = {
       status: { stringValue: 'completed' },
-      endLocation,
       endTime: { timestampValue: new Date().toISOString() },
-      finalFare: { doubleValue: finalFare },
-      distance: { doubleValue: distance },
-    };
-
-    updateRide(ride.id, updateFields, ['status', 'endLocation', 'endTime', 'finalFare', 'distance']);
-  };
-
-  const handleCancelRide = (ride) => {
-    Alert.alert(
-      'Cancel Ride',
-      'Are you sure you want to cancel this ride?',
-      [
-        { text: 'No' },
-        {
-          text: 'Yes',
-          onPress: () => {
-            updateRide(ride.id, { status: { stringValue: 'cancelled' } }, ['status']);
+      driverLocation: {
+        mapValue: {
+          fields: {
+            latitude: { doubleValue: coords.latitude },
+            longitude: { doubleValue: coords.longitude },
           },
         },
-      ],
-      { cancelable: true }
-    );
+      },
+    };
+
+    await updateRide(rideId, updateFields, ['status', 'endTime', 'driverLocation']);
   };
 
-  const parseTimestamp = (value) => {
-    if (!value) return null;
-    if (value.toDate) return value.toDate();
-    if (typeof value === 'string') return new Date(value);
-    if (value.timestampValue) return new Date(value.timestampValue);
-    return null;
+  const getPickupLocation = (trip) => {
+    return trip.pickupLocation || trip.pickup || null;
   };
 
-  const extractCoordinates = (loc) => {
-    if (!loc) return null;
-    if (loc.latitude && loc.longitude) {
-      return { latitude: loc.latitude, longitude: loc.longitude };
-    }
-    if (loc.mapValue?.fields) {
-      return {
-        latitude: Number(loc.mapValue.fields.latitude.doubleValue),
-        longitude: Number(loc.mapValue.fields.longitude.doubleValue),
-      };
-    }
-    return null;
+  const getDropoffLocation = (trip) => {
+    return trip.dropoffLocation || trip.dropoff || null;
   };
 
-  const renderMapPreview = (pickupLoc, dropoffLoc) => {
-    if (!pickupLoc || !dropoffLoc) return null;
+  const formatAddress = (address) => {
+    if (!address) return 'Address not available';
+    if (typeof address === 'string') return address;
+    return address.address || address.name || 'Address not available';
+  };
 
-    const midLat = (pickupLoc.latitude + dropoffLoc.latitude) / 2;
-    const midLon = (pickupLoc.longitude + dropoffLoc.longitude) / 2;
-    const latDelta = Math.abs(pickupLoc.latitude - dropoffLoc.latitude) * 2.5 || 0.02;
-    const lonDelta = Math.abs(pickupLoc.longitude - dropoffLoc.longitude) * 2.5 || 0.02;
+  const calculateDistance = (pickup, dropoff) => {
+    if (!pickup || !dropoff) return 'N/A';
+    const distance = haversine(pickup, dropoff) / 1000;
+    return `${distance.toFixed(1)} km`;
+  };
+
+  const renderTripItem = ({ item: trip }) => {
+    const pickupLoc = getPickupLocation(trip);
+    const dropoffLoc = getDropoffLocation(trip);
 
     return (
-      <MapView
-        style={styles.mapPreview}
-        region={{
-          latitude: midLat,
-          longitude: midLon,
-          latitudeDelta: latDelta,
-          longitudeDelta: lonDelta,
-        }}
-        scrollEnabled={false}
-        zoomEnabled={false}
-        pitchEnabled={false}
-        rotateEnabled={false}
-        pointerEvents="none"
-      >
-        <Marker coordinate={pickupLoc} title="Pickup" pinColor="green" />
-        <Marker coordinate={dropoffLoc} title="Dropoff" pinColor="red" />
-      </MapView>
-    );
-  };
+      <View style={styles.tripItem}>
+        <View style={styles.tripHeader}>
+          <Text style={styles.tripId}>Trip #{trip.id.slice(-6)}</Text>
+          <View style={[styles.statusBadge, { backgroundColor: trip.status === 'accepted' ? '#ff9500' : '#007AFF' }]}>
+            <Text style={styles.statusText}>{trip.status.replace('_', ' ').toUpperCase()}</Text>
+          </View>
+        </View>
 
-  const renderTrip = ({ item }) => {
-    const scheduledDate = parseTimestamp(item.scheduledTime);
+        <View style={styles.locationInfo}>
+          <View style={styles.locationRow}>
+            <View style={styles.locationIcon}>
+              <Text style={styles.iconText}>📍</Text>
+            </View>
+            <View style={styles.locationDetails}>
+              <Text style={styles.locationLabel}>Pickup</Text>
+              <Text style={styles.locationAddress}>{formatAddress(trip.pickupAddress)}</Text>
+            </View>
+          </View>
 
-    const pickupLoc = extractCoordinates(item.pickupLocation);
-    const dropoffLoc = extractCoordinates(item.dropoffLocation);
+          <View style={styles.locationRow}>
+            <View style={styles.locationIcon}>
+              <Text style={styles.iconText}>🏁</Text>
+            </View>
+            <View style={styles.locationDetails}>
+              <Text style={styles.locationLabel}>Dropoff</Text>
+              <Text style={styles.locationAddress}>{formatAddress(trip.dropoffAddress)}</Text>
+            </View>
+          </View>
+        </View>
 
-    return (
-      <View style={styles.card}>
-        <Text style={styles.label}>Pickup:</Text>
-        <Text style={styles.value}>
-          {item.pickupLocation?.address ||
-            item.pickupLocation?.mapValue?.fields?.address?.stringValue ||
-            'N/A'}
-        </Text>
+        <View style={styles.tripDetails}>
+          <Text style={styles.detailText}>Distance: {calculateDistance(pickupLoc, dropoffLoc)}</Text>
+          <Text style={styles.detailText}>Fare: ${trip.fare || 'N/A'}</Text>
+          <Text style={styles.detailText}>Passenger: {trip.passengerName || 'N/A'}</Text>
+        </View>
 
-        <Text style={styles.label}>Drop-off:</Text>
-        <Text style={styles.value}>
-          {item.dropoffLocation?.address ||
-            item.dropoffLocation?.mapValue?.fields?.address?.stringValue ||
-            'N/A'}
-        </Text>
-
-        <Text style={styles.label}>Ride Type:</Text>
-        <Text style={styles.value}>{item.rideType?.stringValue || 'N/A'}</Text>
-
-        <Text style={styles.label}>Scheduled Time:</Text>
-        <Text style={styles.value}>
-          {scheduledDate ? scheduledDate.toLocaleString() : 'N/A'}
-        </Text>
-
-        <Text style={styles.label}>Status:</Text>
-        <Text style={styles.value}>{item.status}</Text>
+        <View style={styles.actionButtons}>
+          {trip.status === 'accepted' && (
+            <TouchableOpacity
+              style={[styles.actionButton, styles.startButton]}
+              onPress={() => handleStartTrip(trip.id)}
+            >
+              <Text style={styles.buttonText}>Start Trip</Text>
+            </TouchableOpacity>
+          )}
+          {trip.status === 'in_progress' && (
+            <TouchableOpacity
+              style={[styles.actionButton, styles.completeButton]}
+              onPress={() => handleCompleteTrip(trip.id)}
+            >
+              <Text style={styles.buttonText}>Complete Trip</Text>
+            </TouchableOpacity>
+          )}
+          {(pickupLoc && dropoffLoc) && (
+            <TouchableOpacity
+              style={[styles.actionButton, styles.mapButton]}
+              onPress={() => openExpandedMap(pickupLoc, dropoffLoc)}
+            >
+              <Text style={styles.buttonText}>View Map</Text>
+            </TouchableOpacity>
+          )}
+        </View>
 
         <TouchableOpacity
-          onPress={() => openExpandedMap(pickupLoc, dropoffLoc)}
-          activeOpacity={0.8}
+          style={styles.chatButton}
+          onPress={() => navigation.navigate('Chat', {
+            rideId: trip.id,
+            userId: trip.userId,
+            driverId: auth.currentUser.uid,
+          })}
         >
-          {renderMapPreview(pickupLoc, dropoffLoc)}
+          <Ionicons name="chatbubble-ellipses-outline" size={20} color="#007bff" />
+          <Text style={styles.chatButtonText}>Chat with Passenger</Text>
         </TouchableOpacity>
-
-        {item.status === 'accepted' && (
-          <View style={styles.buttonRow}>
-            <TouchableOpacity
-              style={styles.cancelBtn}
-              onPress={() => handleCancelRide(item)}
-            >
-              <Text style={styles.btnText}>Cancel Ride</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.acceptBtn}
-              onPress={() => handleStartRide(item)}
-            >
-              <Text style={styles.btnText}>Start Ride</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-
-        {item.status === 'in_progress' && (
-          <TouchableOpacity
-            style={styles.completeBtn}
-            onPress={() => handleCompleteRide(item)}
-          >
-            <Text style={styles.btnText}>Complete Ride</Text>
-          </TouchableOpacity>
-        )}
       </View>
     );
   };
 
-  return (
-    <>
+  if (loading) {
+    return (
       <SafeAreaView style={styles.container}>
-        {loading ? (
-          <ActivityIndicator size="large" color="#FFA500" />
-        ) : (
-          <FlatList
-            data={trips}
-            keyExtractor={(item) => item.id}
-            renderItem={renderTrip}
-            ListEmptyComponent={
-              <Text style={styles.emptyText}>No trips yet.</Text>
-            }
-            contentContainerStyle={trips.length === 0 && { flex: 1, justifyContent: 'center' }}
-          />
-        )}
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#007AFF" />
+          <Text style={styles.loadingText}>Loading your trips...</Text>
+        </View>
       </SafeAreaView>
+    );
+  }
 
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>Your Trips</Text>
+        <TouchableOpacity
+          style={styles.availableRidesButton}
+          onPress={() => navigation.navigate('AvailableRides')}
+        >
+          <Text style={styles.availableRidesText}>Available Rides ({availableRidesCount})</Text>
+        </TouchableOpacity>
+      </View>
+
+      {trips.length === 0 ? (
+        <View style={styles.emptyContainer}>
+          <Text style={styles.emptyText}>No active trips</Text>
+          <Text style={styles.emptySubtext}>Check available rides to accept new trips</Text>
+        </View>
+      ) : (
+        <FlatList
+          data={trips}
+          renderItem={renderTripItem}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={styles.listContainer}
+          showsVerticalScrollIndicator={false}
+        />
+      )}
+
+      {/* Expanded Map Modal */}
       <Modal
         visible={expandedMapVisible}
         animationType="slide"
         onRequestClose={() => setExpandedMapVisible(false)}
       >
-        <SafeAreaView style={{ flex: 1, backgroundColor: '#000' }}>
-          <MapView
-            style={{ flex: 1 }}
-            region={getExpandedMapRegion()}
-            showsUserLocation={true}
-            followsUserLocation={true}
-            loadingEnabled={true}
-          >
-            {expandedMapPickup && (
-              <Marker
-                coordinate={expandedMapPickup}
-                title="Pickup"
-                pinColor="green"
-              />
-            )}
-            {expandedMapDropoff && (
-              <Marker
-                coordinate={expandedMapDropoff}
-                title="Dropoff"
-                pinColor="red"
-              />
-            )}
-            {driverLocation && (
-              <Marker
-                coordinate={driverLocation}
-                title="You"
-                pinColor="blue"
-              />
-            )}
-          </MapView>
+        <SafeAreaView style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Trip Route</Text>
+            <Pressable style={styles.closeButton} onPress={() => setExpandedMapVisible(false)}>
+              <Text style={styles.closeButtonText}>✕</Text>
+            </Pressable>
+          </View>
 
-          <Pressable
-            onPress={() => setExpandedMapVisible(false)}
-            style={styles.closeButton}
-          >
-            <Text style={styles.closeButtonText}>Close Map</Text>
-          </Pressable>
+          {expandedMapPickup && expandedMapDropoff && (
+            <MapView
+              style={styles.expandedMap}
+              region={getExpandedMapRegion()}
+              showsUserLocation={true}
+              showsMyLocationButton={true}
+            >
+              <Marker coordinate={expandedMapPickup} title="Pickup Location" pinColor="green" />
+              <Marker coordinate={expandedMapDropoff} title="Dropoff Location" pinColor="red" />
+              {driverLocation && (
+                <Marker coordinate={driverLocation} title="Your Location" pinColor="blue" />
+              )}
+              <Polyline coordinates={[expandedMapPickup, expandedMapDropoff]} strokeColor="#007AFF" strokeWidth={3} />
+            </MapView>
+          )}
         </SafeAreaView>
       </Modal>
-    </>
+    </SafeAreaView>
   );
 }
+
+
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    paddingHorizontal: 20,
-    paddingTop: 10,
-    backgroundColor: '#1a1a1a',
+    backgroundColor: '#f5f5f5',
   },
-  card: {
-    backgroundColor: '#222',
-    borderRadius: 12,
-    padding: 20,
-    marginBottom: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.3,
-    shadowRadius: 5,
-    elevation: 5,
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  label: {
-    color: '#FFB84D',
-    fontSize: 14,
-    marginBottom: 4,
+  loadingText: {
+    marginTop: 10,
+    fontSize: 16,
+    color: '#666',
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 16,
+    backgroundColor: '#fff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e0e0e0',
+  },
+  headerTitle: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#333',
+  },
+  availableRidesButton: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+  },
+  availableRidesText: {
+    color: '#fff',
+    fontSize: 12,
     fontWeight: '600',
   },
-  value: {
-    color: '#FFA500',
-    fontSize: 16,
-    marginBottom: 10,
-  },
-  acceptBtn: {
-    backgroundColor: '#FFA500',
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginTop: 12,
-    shadowColor: '#FFA500',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.7,
-    shadowRadius: 5,
-    elevation: 6,
+  emptyContainer: {
     flex: 1,
-    marginLeft: 10,
-  },
-  completeBtn: {
-    backgroundColor: '#cc8400',
-    paddingVertical: 14,
-    borderRadius: 12,
+    justifyContent: 'center',
     alignItems: 'center',
-    marginTop: 12,
-    shadowColor: '#cc8400',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.7,
-    shadowRadius: 5,
-    elevation: 6,
-  },
-  cancelBtn: {
-    backgroundColor: '#FF4D4D',
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    marginTop: 12,
-    shadowColor: '#FF4D4D',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.7,
-    shadowRadius: 5,
-    elevation: 6,
-    flex: 1,
-    marginRight: 10,
-  },
-  btnText: {
-    color: '#1a1a1a',
-    fontWeight: '700',
-    fontSize: 16,
+    padding: 32,
   },
   emptyText: {
-    color: '#FFB84D',
     fontSize: 18,
+    fontWeight: '600',
+    color: '#666',
+    marginBottom: 8,
+  },
+  emptySubtext: {
+    fontSize: 14,
+    color: '#999',
     textAlign: 'center',
-    marginTop: 50,
   },
-  mapPreview: {
-    width: windowWidth - 60,
-    height: 120,
+  listContainer: {
+    padding: 16,
+  },
+  tripItem: {
+    backgroundColor: '#fff',
     borderRadius: 12,
-    marginVertical: 10,
+    padding: 16,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: {
+      width: 0,
+      height: 2,
+    },
+    shadowOpacity: 0.1,
+    shadowRadius: 3.84,
+    elevation: 5,
   },
-  buttonRow: {
+  tripHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  tripId: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
+  },
+  statusBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  statusText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  locationInfo: {
+    marginBottom: 12,
+  },
+  locationRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 8,
+  },
+  locationIcon: {
+    width: 24,
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  iconText: {
+    fontSize: 16,
+  },
+  locationDetails: {
+    flex: 1,
+  },
+  locationLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#666',
+    marginBottom: 2,
+  },
+  locationAddress: {
+    fontSize: 14,
+    color: '#333',
+    lineHeight: 18,
+  },
+  tripDetails: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  detailText: {
+    fontSize: 12,
+    color: '#666',
+    flex: 1,
+  },
+  actionButtons: {
     flexDirection: 'row',
     justifyContent: 'space-between',
   },
-  closeButton: {
-    backgroundColor: '#FFA500',
-    padding: 15,
+  actionButton: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 8,
     alignItems: 'center',
+    marginHorizontal: 4,
+  },
+  startButton: {
+    backgroundColor: '#34C759',
+  },
+  completeButton: {
+    backgroundColor: '#FF3B30',
+  },
+  mapButton: {
+    backgroundColor: '#007AFF',
+  },
+  buttonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  modalContainer: {
+    flex: 1,
+    backgroundColor: '#fff',
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e0e0e0',
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#333',
+  },
+  closeButton: {
+    padding: 8,
   },
   closeButtonText: {
-    color: '#1a1a1a',
-    fontWeight: '700',
     fontSize: 18,
+    color: '#007AFF',
   },
+  expandedMap: {
+    flex: 1,
+  },
+  chatButton: {
+  flexDirection: 'row',
+  alignItems: 'center',
+  paddingVertical: 4,
+  paddingHorizontal: 8,
+  borderRadius: 6,
+  borderWidth: 1,
+  borderColor: '#007bff',
+  marginTop: 8,
+},
+chatButtonText: {
+  marginLeft: 6,
+  fontSize: 14,
+  color: '#007bff',
+  fontWeight: '600',
+},
+
 });

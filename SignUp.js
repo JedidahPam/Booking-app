@@ -12,17 +12,10 @@ import { createUserWithEmailAndPassword } from 'firebase/auth';
 import { setDoc, doc } from 'firebase/firestore';
 import { auth, db } from './firebaseConfig';
 import { Ionicons } from '@expo/vector-icons';
-import { FirebaseRecaptchaVerifierModal } from 'expo-firebase-recaptcha';
-import { PhoneAuthProvider } from 'firebase/auth';
-import { firebaseConfig } from './firebaseConfig'; // make sure this has `apiKey`, `authDomain`, etc.
-import { useRef } from 'react';
-// firebaseConfig.js
-
 
 export default function SignupScreen({ navigation }) {
   const [passwordStrength, setPasswordStrength] = useState('');
 
-  // Password strength evaluator function (top level)
   const evaluatePasswordStrength = (password) => {
     if (password.length >= 8) {
       if (/[A-Z]/.test(password) && /\d/.test(password) && /[@#$!]/.test(password)) {
@@ -43,32 +36,13 @@ export default function SignupScreen({ navigation }) {
     firstname: '',
     lastname: '',
     role: 'rider',
-    profileImage: '',
   });
 
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [emailError, setEmailError] = useState('');
   const [phoneError, setPhoneError] = useState('');
-  const recaptchaVerifier = useRef(null);
-
   const [isFormValid, setIsFormValid] = useState(false);
-
-  const handleChange = (key, value) => {
-    if (key === 'phone') {
-      const cleaned = value.replace(/[^0-9]/g, '');
-      if (cleaned.length <= 11) {
-        setFormData(prev => ({ ...prev, phone: cleaned }));
-        validatePhone(cleaned);
-      }
-    } else if (key === 'password') {
-      setFormData(prev => ({ ...prev, password: value }));
-      evaluatePasswordStrength(value);
-    } else {
-      setFormData(prev => ({ ...prev, [key]: value }));
-    }
-  };
-
 
   const validateEmail = (email) => {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -80,14 +54,26 @@ export default function SignupScreen({ navigation }) {
   };
 
   const validatePhone = (phone) => {
-    const phoneRegex = /^(070|080|081|090|091|071)\d{8}$/;
+    const phoneRegex = /^\+?[1-9]\d{7,14}$/;
     if (phone && !phoneRegex.test(phone)) {
-      setPhoneError('Invalid phone number');
+      setPhoneError('Enter a valid phone number');
     } else {
       setPhoneError('');
     }
   };
 
+  const handleChange = (key, value) => {
+    if (key === 'phone') {
+      const cleaned = value.replace(/[^\d+]/g, ''); // allow digits and plus
+      setFormData(prev => ({ ...prev, phone: cleaned }));
+      validatePhone(cleaned);
+    } else if (key === 'password') {
+      setFormData(prev => ({ ...prev, password: value }));
+      evaluatePasswordStrength(value);
+    } else {
+      setFormData(prev => ({ ...prev, [key]: value }));
+    }
+  };
 
   useEffect(() => {
     const { email, password, confirmPassword, firstname, lastname, phone, role } = formData;
@@ -122,7 +108,7 @@ export default function SignupScreen({ navigation }) {
         navigation.navigate('SignIn');
       }
     } catch (error) {
-      Alert.alert('Sign Up Failed', 'Please reveiw your details' );
+      Alert.alert('Sign Up Failed', 'Please review your details');
       console.error(error);
     }
   };
@@ -171,48 +157,48 @@ export default function SignupScreen({ navigation }) {
         {emailError ? <Text style={styles.errorText}>{emailError}</Text> : null}
       </View>
 
-   {/* Password */}
-<View style={styles.passwordWrapper}>
-  <TextInput
-    style={styles.input}
-    placeholder="Password"
-    placeholderTextColor="#888"
-    secureTextEntry={!showPassword}
-    value={formData.password}
-    onChangeText={text => handleChange('password', text)}
-    importantForAutofill="no"
-    autoComplete="off"
-    textContentType="none"
-  />
-  <TouchableOpacity onPress={() => setShowPassword(prev => !prev)}>
-    <Ionicons name={showPassword ? 'eye-off' : 'eye'} size={20} color="#fff" />
-  </TouchableOpacity>
-</View>
+      {/* Password */}
+      <View style={styles.passwordWrapper}>
+        <TextInput
+          style={styles.input}
+          placeholder="Password"
+          placeholderTextColor="#888"
+          secureTextEntry={!showPassword}
+          value={formData.password}
+          onChangeText={text => handleChange('password', text)}
+          importantForAutofill="no"
+          autoComplete="off"
+          textContentType="none"
+        />
+        <TouchableOpacity onPress={() => setShowPassword(prev => !prev)}>
+          <Ionicons name={showPassword ? 'eye-off' : 'eye'} size={20} color="#fff" />
+        </TouchableOpacity>
+      </View>
 
-{/* Password Strength Indicator */}
-{formData.password.length > 0 && (
-  <Text
-    style={[
-      styles.strengthText,
-      passwordStrength === 'Strong'
-        ? styles.strong
-        : passwordStrength === 'Moderate'
-        ? styles.moderate
-        : styles.weak,
-    ]}
-  >
-    Password Strength: {passwordStrength}
-  </Text>
-)}
+      {/* Password Strength Indicator */}
+      {formData.password.length > 0 && (
+        <Text
+          style={[
+            styles.strengthText,
+            passwordStrength === 'Strong'
+              ? styles.strong
+              : passwordStrength === 'Moderate'
+              ? styles.moderate
+              : styles.weak,
+          ]}
+        >
+          Password Strength: {passwordStrength}
+        </Text>
+      )}
 
-{/* Password Requirements */}
-<View style={styles.requirementsContainer}>
-  <Text style={styles.requirementTitle}>Your password must contain:</Text>
-  <Text style={styles.requirement}>• At least 8 characters</Text>
-  <Text style={styles.requirement}>• At least 1 uppercase letter</Text>
-  <Text style={styles.requirement}>• At least 1 number</Text>
-  <Text style={styles.requirement}>• At least 1 special character (e.g. @, #, !)</Text>
-</View>
+      {/* Password Requirements */}
+      <View style={styles.requirementsContainer}>
+        <Text style={styles.requirementTitle}>Your password must contain:</Text>
+        <Text style={styles.requirement}>• At least 8 characters</Text>
+        <Text style={styles.requirement}>• At least 1 uppercase letter</Text>
+        <Text style={styles.requirement}>• At least 1 number</Text>
+        <Text style={styles.requirement}>• At least 1 special character (e.g. @, #, !)</Text>
+      </View>
 
       {/* Confirm Password */}
       <View style={styles.passwordWrapper}>
@@ -265,47 +251,6 @@ export default function SignupScreen({ navigation }) {
           </Text>
         </TouchableOpacity>
       </View>
-
-      {/* Profile Image */}
-      <View style={styles.inputWrapper}>
-        <TextInput
-          style={styles.input}
-          placeholder="Profile Image URL (optional)"
-          placeholderTextColor="#888"
-          value={formData.profileImage}
-          onChangeText={text => handleChange('profileImage', text)}
-        />
-      </View>
-
-      <FirebaseRecaptchaVerifierModal
-  ref={recaptchaVerifier}
-  firebaseConfig={firebaseConfig}
-/>
-
-<TouchableOpacity
-  style={[styles.submitButton, { backgroundColor: '#FFA500', marginTop: 8 }]}
-  onPress={async () => {
-    if (!formData.phone.match(/^(070|080|081|090|091|071)\d{8}$/)) {
-      Alert.alert('Invalid', 'Enter a valid phone number');
-      return;
-    }
-
-    try {
-      const phoneProvider = new PhoneAuthProvider(auth);
-      const verificationId = await phoneProvider.verifyPhoneNumber(
-        `+234${formData.phone.slice(1)}`, // strip first 0 and prepend +234
-        recaptchaVerifier.current
-      );
-      navigation.navigate('VerifyOtp', { verificationId, phone: formData.phone });
-    } catch (error) {
-      console.error(error);
-      Alert.alert('OTP Error', error.message);
-    }
-  }}
->
-  <Text style={styles.buttonText}>Send OTP</Text>
-</TouchableOpacity>
-
 
       {/* Submit */}
       <TouchableOpacity
@@ -439,32 +384,20 @@ const styles = StyleSheet.create({
   weak: {
     color: '#FF4C4C',
   },
-  lengthText: {
-  fontSize: 12,
-  fontWeight: '600',
-  marginBottom: 10,
-},
-lengthValid: {
-  color: 'lightgreen',
-},
-lengthInvalid: {
-  color: '#FF4C4C',
-},
-requirementsContainer: {
-  marginBottom: 16,
-  marginTop: -8,
-},
-requirementTitle: {
-  color: '#FFA500',
-  fontWeight: '600',
-  marginBottom: 4,
-  fontSize: 13,
-},
-requirement: {
-  color: '#ccc',
-  fontSize: 12,
-  marginLeft: 4,
-  marginTop: 2,
-},
-
+  requirementsContainer: {
+    marginBottom: 16,
+    marginTop: -8,
+  },
+  requirementTitle: {
+    color: '#FFA500',
+    fontWeight: '600',
+    marginBottom: 4,
+    fontSize: 13,
+  },
+  requirement: {
+    color: '#ccc',
+    fontSize: 12,
+    marginLeft: 4,
+    marginTop: 2,
+  },
 });

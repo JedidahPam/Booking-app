@@ -15,6 +15,7 @@ import { signInWithEmailAndPassword } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { auth, db } from './firebaseConfig';
 import { CommonActions } from '@react-navigation/native';
+import { Ionicons } from '@expo/vector-icons';
 
 const windowWidth = Dimensions.get('window').width;
 const logo = require('./assets/logo4.png'); // adjust path if needed
@@ -26,64 +27,77 @@ export default function SignIn({ navigation }) {
   const [selectedRole, setSelectedRole] = useState('rider'); // 'rider' or 'driver'
   const [passwordVisible, setPasswordVisible] = useState(false);
 
-  const handleSignIn = async () => {
-    if (!email || !password) {
-      Alert.alert('Error', 'Please enter both email and password');
-      return;
-    }
+ const handleSignIn = async () => {
+  if (!email || !password) {
+    Alert.alert('Error', 'Please enter both email and password');
+    return;
+  }
 
-    try {
-      const userCredential = await signInWithEmailAndPassword(auth, email, password);
-      const uid = userCredential.user.uid;
+  try {
+    const userCredential = await signInWithEmailAndPassword(auth, email, password);
+    const uid = userCredential.user.uid;
 
-      const userDocRef = doc(db, 'users', uid);
-      const userDocSnap = await getDoc(userDocRef);
+    const userDocRef = doc(db, 'users', uid);
+    const userDocSnap = await getDoc(userDocRef);
 
-      if (userDocSnap.exists()) {
-        const userData = userDocSnap.data();
-        const roleInFirestore = userData.role;
+    if (userDocSnap.exists()) {
+      const userData = userDocSnap.data();
+      const roleInFirestore = userData.role;
 
-        if (roleInFirestore === selectedRole) {
-          if (selectedRole === 'driver') {
-            navigation.dispatch(
-              CommonActions.reset({
-                index: 0,
-                routes: [{ name: 'DriverMain' }],
-              })
-            );
-          } else {
-            navigation.dispatch(
-              CommonActions.reset({
-                index: 0,
-                routes: [{ name: 'Main' }],
-              })
-            );
-          }
-        } else {
+      // If driver, check approved status
+      if (roleInFirestore === 'driver') {
+        if (userData.approved === false) {
           Alert.alert(
-            'Role Mismatch',
-            `Please select the correct role.`
+            'Access Denied',
+            'Your account has been rejected. Please contact support.'
+          );
+          await auth.signOut();
+          return; // stop further navigation
+        }
+      }
+
+      if (roleInFirestore === selectedRole) {
+        if (selectedRole === 'driver') {
+          navigation.dispatch(
+            CommonActions.reset({
+              index: 0,
+              routes: [{ name: 'DriverMain' }],
+            })
+          );
+        } else {
+          navigation.dispatch(
+            CommonActions.reset({
+              index: 0,
+              routes: [{ name: 'Main' }],
+            })
           );
         }
       } else {
-        Alert.alert('Error', 'User data not found.');
+        Alert.alert(
+          'Role Mismatch',
+          `Please select the correct role.`
+        );
       }
-    } catch (error) {
-      switch (error.code) {
-        case 'auth/invalid-email':
-          Alert.alert('Invalid Email', 'Please check your email address.');
-          break;
-        case 'auth/user-not-found':
-          Alert.alert('User Not Found', 'No user found with this email.');
-          break;
-        case 'auth/wrong-password':
-          Alert.alert('Wrong Password', 'Incorrect password.');
-          break;
-        default:
-          Alert.alert('Sign In Failed');
-      }
+    } else {
+      Alert.alert('Error', 'User data not found.');
     }
-  };
+  } catch (error) {
+    switch (error.code) {
+      case 'auth/invalid-email':
+        Alert.alert('Invalid Email', 'Please check your email address.');
+        break;
+      case 'auth/user-not-found':
+        Alert.alert('User Not Found', 'No user found with this email.');
+        break;
+      case 'auth/wrong-password':
+        Alert.alert('Wrong Password', 'Incorrect password.');
+        break;
+      default:
+        Alert.alert('Sign In Failed');
+    }
+  }
+};
+
 
   return (
     <KeyboardAvoidingView
@@ -132,8 +146,14 @@ export default function SignIn({ navigation }) {
             onChangeText={setPassword}
           />
           <TouchableOpacity onPress={() => setPasswordVisible(!passwordVisible)}>
-            <Text style={styles.eyeIcon}>{passwordVisible ? '🙈' : '👁️'}</Text>
+            <Ionicons
+            name={passwordVisible ? 'eye-off' : 'eye'}
+            size={24}
+            color="#fff"
+            style={styles.showPasswordIcon}
+           />
           </TouchableOpacity>
+
         </View>
 
         
