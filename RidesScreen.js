@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,119 +8,185 @@ import {
   RefreshControl,
   TouchableOpacity,
   SafeAreaView,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from './ThemeContext';
 import { useNavigation } from '@react-navigation/native';
-import { auth } from './firebaseConfig';
+import { auth, db } from './firebaseConfig'; // Ensure 'db' is imported
 
-const API_KEY = "AIzaSyAZf-KMgaokOF-PVhxgXG64bxWK28_h9-0"; // Replace with your actual API key
-const PROJECT_ID = "local-transport-booking-app";    // Replace with your Firebase project ID
-const PAGE_SIZE = 20;
+// Import gesture handler components
+import { Swipeable } from 'react-native-gesture-handler';
+
+// Import Firestore functions for real-time listening
+import {
+  collection,
+  query,
+  where,
+  onSnapshot, // Import onSnapshot for real-time updates
+} from 'firebase/firestore';
+
+// API_KEY, PROJECT_ID, PAGE_SIZE are no longer needed for onSnapshot direct usage
+// const API_KEY = "AIzaSyAZf-KMgaokOF-PVhxgXG64bxWK28_h9-0";
+// const PROJECT_ID = "local-transport-booking-app";
+// const PAGE_SIZE = 20;
 
 const RidesScreen = () => {
   const { darkMode } = useTheme();
   const navigation = useNavigation();
 
   const [rides, setRides] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true); // Set to true initially for listener setup
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
-  const [nextPageToken, setNextPageToken] = useState(null);
+  // nextPageToken is no longer needed with onSnapshot
+  // const [nextPageToken, setNextPageToken] = useState(null);
 
-  const fetchRides = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-
-      const currentUserId = auth.currentUser?.uid;
-      if (!currentUserId) {
-        throw new Error('User not authenticated');
-      }
-
-      let url = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents/rides?pageSize=${PAGE_SIZE}&key=${API_KEY}`;
-      if (nextPageToken) {
-        url += `&pageToken=${nextPageToken}`;
-      }
-
-      const response = await fetch(url);
-      const data = await response.json();
-
-      if (!response.ok) {
-        console.error('Firestore error:', data);
-        throw new Error(data.error?.message || 'Failed to fetch rides');
-      }
-
-      const documents = data.documents || [];
-      const userRides = documents
-        .filter(doc => doc.fields?.userId?.stringValue === currentUserId)
-        .map(doc => {
-          const fields = doc.fields || {};
-          
-          // Extract nested pickup location
-          const pickupData = fields.pickup?.mapValue?.fields || {};
-          const pickup = {
-            address: pickupData.address?.stringValue || 'Unknown pickup',
-            latitude: pickupData.latitude?.doubleValue || pickupData.latitude?.integerValue || null,
-            longitude: pickupData.longitude?.doubleValue || pickupData.longitude?.integerValue || null,
-          };
-
-          // Extract nested dropoff location
-          const dropoffData = fields.dropoff?.mapValue?.fields || {};
-          const dropoff = {
-            address: dropoffData.address?.stringValue || 'Unknown dropoff',
-            latitude: dropoffData.latitude?.doubleValue || dropoffData.latitude?.integerValue || null,
-            longitude: dropoffData.longitude?.doubleValue || dropoffData.longitude?.integerValue || null,
-          };
-
-          return {
-            id: doc.name.split('/').pop(),
-            pickup,
-            dropoff,
-            status: fields.status?.stringValue || 'pending',
-            timestamp: fields.timestamp?.timestampValue || null,
-            distance: fields.distance?.doubleValue || fields.distance?.integerValue || null,
-            price: fields.price?.doubleValue || fields.price?.integerValue || null,
-            paymentMethod: fields.paymentMethod?.stringValue || null,
-            driverId: fields.driverId?.stringValue || null,  // Added driverId here
-          };
-        });
-
-      setRides(prev => {
-        const existingIds = new Set(prev.map(ride => ride.id));
-        const newRides = userRides.filter(ride => !existingIds.has(ride.id));
-        return [...prev, ...newRides];
-      });
-      setNextPageToken(data.nextPageToken || null);
-    } catch (err) {
-      console.error('Fetch error:', err);
-      setError(err.message || 'Something went wrong.');
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  };
+  // useRef to store the unsubscribe function for the real-time listener
+  const ridesUnsubscribeRef = useRef(null);
 
   useEffect(() => {
-    fetchRides();
-  }, []);
+    const currentUserId = auth.currentUser?.uid;
+    if (!currentUserId) {
+      setError('User not authenticated');
+      setLoading(false);
+      return;
+    }
 
+    setLoading(true);
+    setError(null);
+
+    const ridesCollectionRef = collection(db, 'rides');
+    // Query for rides where the userId matches the current authenticated user
+    const q = query(ridesCollectionRef, where('userId', '==', currentUserId));
+
+    // Set up the real-time listener using onSnapshot
+    ridesUnsubscribeRef.current = onSnapshot(
+      q,
+      (snapshot) => {
+        const userRides = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+
+          // Ensure proper data extraction matching your Firestore document structure
+          const pickupData = data.pickup || {};
+          const dropoffData = data.dropoff || {};
+
+          // --- FIX APPLIED HERE for timestamp ---
+          let rideTimestamp = null;
+          if (data.timestamp) {
+            // Check if it's a Firestore Timestamp object (has toDate method)
+            if (typeof data.timestamp.toDate === 'function') {
+              rideTimestamp = data.timestamp.toDate();
+            } else {
+              // Otherwise, assume it's a value parsable by Date constructor (e.g., number, ISO string)
+              rideTimestamp = new Date(data.timestamp);
+            }
+          }
+          // --- END FIX ---
+
+          userRides.push({
+            id: docSnap.id,
+            pickup: {
+              address: pickupData.address || 'Unknown pickup',
+              latitude: pickupData.latitude || null,
+              longitude: pickupData.longitude || null,
+            },
+            dropoff: {
+              address: dropoffData.address || 'Unknown dropoff',
+              latitude: dropoffData.latitude || null,
+              longitude: dropoffData.longitude || null,
+            },
+            status: data.status || 'pending',
+            timestamp: rideTimestamp, // Use the processed timestamp
+            distance: data.distance || null,
+            price: data.price || null,
+            paymentMethod: data.paymentMethod || null,
+            driverId: data.driverId || null,
+          });
+        });
+
+        setRides(userRides);
+        setLoading(false);
+        setRefreshing(false); // Stop refreshing indicator after data loads
+      },
+      (err) => {
+        // Error handling for the real-time listener
+        console.error('Real-time listener error:', err);
+        setError(err.message || 'Failed to fetch real-time rides.');
+        setLoading(false);
+        setRefreshing(false);
+      }
+    );
+
+    // Cleanup function: unsubscribe from the listener when the component unmounts
+    return () => {
+      if (ridesUnsubscribeRef.current) {
+        ridesUnsubscribeRef.current();
+      }
+    };
+  }, []); // Empty dependency array means this useEffect runs once on component mount
+
+  // onRefresh will simply reset states, the onSnapshot listener will then re-trigger
   const onRefresh = useCallback(() => {
     setRefreshing(true);
-    setRides([]);
-    setNextPageToken(null);
-    fetchRides();
+    setRides([]); // Clear existing rides to show fresh data loading
+    setError(null);
+    // The onSnapshot listener itself will handle fetching fresh data
+    // No explicit fetch call needed here, as the listener is always active.
+    // If you need to force a re-subscription, you'd unsubscribe and then re-subscribe.
   }, []);
 
-  const handleLoadMore = () => {
-    if (!loading && nextPageToken) {
-      fetchRides();
-    }
+  // handleLoadMore is no longer needed as onSnapshot handles real-time updates
+  // const handleLoadMore = () => {
+  //   if (!loading && nextPageToken) {
+  //     fetchRides();
+  //   }
+  // };
+
+  // Function to remove a single ride by ID
+  const removeRide = (id) => {
+    Alert.alert(
+      "Remove Ride",
+      "Are you sure you want to remove this ride from the list? This will not delete it from the database.",
+      [
+        {
+          text: "Cancel",
+          style: "cancel"
+        },
+        {
+          text: "Remove",
+          onPress: () => {
+            setRides(prevRides => prevRides.filter(ride => ride.id !== id));
+          }
+        }
+      ]
+    );
+  };
+
+  // Render method for the right swipe action (e.g., delete button)
+  const renderRightActions = (progress, dragX, id) => {
+    const scale = dragX.interpolate({
+      inputRange: [-100, 0],
+      outputRange: [1, 0],
+      extrapolate: 'clamp',
+    });
+    return (
+      <TouchableOpacity onPress={() => removeRide(id)} style={styles.deleteBox}>
+        <Ionicons name="trash" size={24} color="white" />
+        <Text style={styles.deleteText}>Delete</Text>
+      </TouchableOpacity>
+    );
   };
 
   const formatDate = (timestamp) => {
     if (!timestamp) return '';
     const date = new Date(timestamp);
+    // Ensure date is valid before formatting
+    if (isNaN(date.getTime())) {
+      console.warn("Invalid timestamp encountered:", timestamp);
+      return 'Invalid Date';
+    }
     return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
@@ -132,6 +198,10 @@ const RidesScreen = () => {
         return '#FF9800';
       case 'cancelled':
         return '#F44336';
+      case 'accepted': // Added accepted status color
+        return '#007bff';
+      case 'in_progress': // Added in_progress status color
+        return '#8A2BE2'; // Example color, adjust as needed
       default:
         return '#757575';
     }
@@ -141,7 +211,7 @@ const RidesScreen = () => {
     <SafeAreaView style={[styles.container, darkMode && { backgroundColor: '#000' }]}>
       <View style={styles.header}>
         <Text style={[styles.title, darkMode && { color: '#fff' }]}>Your Rides</Text>
-        <TouchableOpacity onPress={onRefresh}>
+        <TouchableOpacity onPress={onRefresh} style={styles.headerButton}>
           <Ionicons name="refresh" size={24} color={darkMode ? '#fff' : '#000'} />
         </TouchableOpacity>
       </View>
@@ -154,7 +224,7 @@ const RidesScreen = () => {
       ) : error ? (
         <View style={styles.centerContainer}>
           <Text style={styles.errorText}>{error}</Text>
-          <TouchableOpacity style={styles.retryButton} onPress={fetchRides}>
+          <TouchableOpacity style={styles.retryButton} onPress={onRefresh}> {/* onRefresh will handle re-triggering the listener */}
             <Text style={styles.retryButtonText}>Retry</Text>
           </TouchableOpacity>
         </View>
@@ -165,105 +235,113 @@ const RidesScreen = () => {
       ) : (
         <ScrollView
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-          onScroll={({ nativeEvent }) => {
-            const isCloseToBottom =
-              nativeEvent.layoutMeasurement.height + nativeEvent.contentOffset.y >=
-              nativeEvent.contentSize.height - 20;
-            if (isCloseToBottom) handleLoadMore();
-          }}
-          scrollEventThrottle={400}
+          // onScroll and handleLoadMore are removed as onSnapshot handles updates
+          // onScroll={({ nativeEvent }) => {
+          //   const isCloseToBottom =
+          //     nativeEvent.layoutMeasurement.height + nativeEvent.contentOffset.y >=
+          //     nativeEvent.contentSize.height - 20;
+          //   if (isCloseToBottom) handleLoadMore();
+          // }}
+          // scrollEventThrottle={400}
           showsVerticalScrollIndicator={false}
         >
           {rides.map(ride => (
-            <TouchableOpacity
+            <Swipeable
               key={ride.id}
-              style={[
-                styles.rideCard,
-                darkMode && { backgroundColor: '#1a1a1a' }
-              ]}
-              onPress={() => navigation.navigate('Home', { rideId: ride.id })}
-              activeOpacity={0.7}
+              renderRightActions={(progress, dragX) => renderRightActions(progress, dragX, ride.id)}
+              overshootRight={false} // Prevents overswiping past the delete button
+              containerStyle={styles.swipeableContainer}
             >
-              <View style={styles.rideHeader}>
-                <View style={[styles.statusBadge, { backgroundColor: getStatusColor(ride.status) }]}>
-                  <Text style={styles.statusText}>{ride.status?.toUpperCase()}</Text>
-                </View>
-                {ride.timestamp && (
-                  <Text style={[styles.dateText, darkMode && { color: '#ccc' }]}>
-                    {formatDate(ride.timestamp)}
-                  </Text>
-                )}
-              </View>
-
-              <View style={styles.locationContainer}>
-                <View style={styles.locationRow}>
-                  <View style={styles.locationDot} />
-                  <View style={styles.locationInfo}>
-                    <Text style={[styles.locationLabel, darkMode && { color: '#ccc' }]}>From</Text>
-                    <Text style={[styles.locationText, darkMode && { color: '#fff' }]} numberOfLines={2}>
-                      {ride.pickup.address}
+              <TouchableOpacity
+                style={[
+                  styles.rideCard,
+                  darkMode && { backgroundColor: '#1a1a1a' }
+                ]}
+                onPress={() => navigation.navigate('Home', { rideId: ride.id })}
+                activeOpacity={0.7}
+              >
+                <View style={styles.rideHeader}>
+                  <View style={[styles.statusBadge, { backgroundColor: getStatusColor(ride.status) }]}>
+                    <Text style={styles.statusText}>{ride.status?.toUpperCase()}</Text>
+                  </View>
+                  {ride.timestamp && (
+                    <Text style={[styles.dateText, darkMode && { color: '#ccc' }]}>
+                      {formatDate(ride.timestamp)}
                     </Text>
+                  )}
+                </View>
+
+                <View style={styles.locationContainer}>
+                  <View style={styles.locationRow}>
+                    <View style={styles.locationDot} />
+                    <View style={styles.locationInfo}>
+                      <Text style={[styles.locationLabel, darkMode && { color: '#ccc' }]}>From</Text>
+                      <Text style={[styles.locationText, darkMode && { color: '#fff' }]} numberOfLines={2}>
+                        {ride.pickup.address}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.locationConnector} />
+
+                  <View style={styles.locationRow}>
+                    <View style={[styles.locationDot, { backgroundColor: '#F44336' }]} />
+                    <View style={styles.locationInfo}>
+                      <Text style={[styles.locationLabel, darkMode && { color: '#ccc' }]}>To</Text>
+                      <Text style={[styles.locationText, darkMode && { color: '#fff' }]} numberOfLines={2}>
+                        {ride.dropoff.address}
+                      </Text>
+                    </View>
                   </View>
                 </View>
 
-                <View style={styles.locationConnector} />
+                <View style={styles.rideFooter}>
+                  <View style={styles.infoGroup}>
+                    {ride.distance && (
+                      <View style={styles.infoItem}>
+                        <Ionicons name="location" size={14} color={darkMode ? '#ccc' : '#666'} />
+                        <Text style={[styles.infoText, darkMode && { color: '#ccc' }]}>
+                          {ride.distance.toFixed(1)} km
+                        </Text>
+                      </View>
+                    )}
+                    {typeof ride.price === 'number' && (
+                      <View style={styles.infoItem}>
+                        <Ionicons name="card" size={14} color={darkMode ? '#ccc' : '#666'} />
+                        <Text style={[styles.infoText, darkMode && { color: '#ccc' }]}>
+                          ${ride.price.toFixed(2)}
+                        </Text>
+                      </View>
+                    )}
 
-                <View style={styles.locationRow}>
-                  <View style={[styles.locationDot, { backgroundColor: '#F44336' }]} />
-                  <View style={styles.locationInfo}>
-                    <Text style={[styles.locationLabel, darkMode && { color: '#ccc' }]}>To</Text>
-                    <Text style={[styles.locationText, darkMode && { color: '#fff' }]} numberOfLines={2}>
-                      {ride.dropoff.address}
-                    </Text>
+                    {ride.paymentMethod && (
+                      <View style={styles.infoItem}>
+                        <Ionicons
+                          name={ride.paymentMethod === 'cash' ? 'cash' : 'card'}
+                          size={14}
+                          color={darkMode ? '#ccc' : '#666'}
+                        />
+                        <Text style={[styles.infoText, darkMode && { color: '#ccc' }]}>
+                          {ride.paymentMethod}
+                        </Text>
+                      </View>
+                    )}
                   </View>
-                </View>
-              </View>
 
-              <View style={styles.rideFooter}>
-                <View style={styles.infoGroup}>
-                  {ride.distance && (
-                    <View style={styles.infoItem}>
-                      <Ionicons name="location" size={14} color={darkMode ? '#ccc' : '#666'} />
-                      <Text style={[styles.infoText, darkMode && { color: '#ccc' }]}>
-                        {ride.distance.toFixed(1)} km
-                      </Text>
-                    </View>
-                  )}
-                  {ride.price && (
-                    <View style={styles.infoItem}>
-                      <Ionicons name="card" size={14} color={darkMode ? '#ccc' : '#666'} />
-                      <Text style={[styles.infoText, darkMode && { color: '#ccc' }]}>
-                        ${ride.price.toFixed(2)}
-                      </Text>
-                    </View>
-                  )}
-                  {ride.paymentMethod && (
-                    <View style={styles.infoItem}>
-                      <Ionicons
-                        name={ride.paymentMethod === 'cash' ? 'cash' : 'card'}
-                        size={14}
-                        color={darkMode ? '#ccc' : '#666'}
-                      />
-                      <Text style={[styles.infoText, darkMode && { color: '#ccc' }]}>
-                        {ride.paymentMethod}
-                      </Text>
-                    </View>
-                  )}
+                  <TouchableOpacity
+                    style={styles.chatButton}
+                    onPress={() => navigation.navigate('Chat', {
+                      rideId: ride.id,
+                      userId: auth.currentUser.uid,
+                      driverId: ride.driverId,
+                    })}
+                  >
+                    <Ionicons name="chatbubble-ellipses-outline" size={20} color={darkMode ? '#fff' : '#007bff'} />
+                    <Text style={[styles.chatButtonText, darkMode && { color: '#fff' }]}>Chat with Driver</Text>
+                  </TouchableOpacity>
                 </View>
-
-                <TouchableOpacity
-                  style={styles.chatButton}
-                  onPress={() => navigation.navigate('Chat', {
-                    rideId: ride.id,
-                    userId: auth.currentUser.uid,
-                    driverId: ride.driverId,
-                  })}
-                >
-                  <Ionicons name="chatbubble-ellipses-outline" size={20} color={darkMode ? '#fff' : '#007bff'} />
-                  <Text style={[styles.chatButtonText, darkMode && { color: '#fff' }]}>Chat with Driver</Text>
-                </TouchableOpacity>
-              </View>
-            </TouchableOpacity>
+              </TouchableOpacity>
+            </Swipeable>
           ))}
 
           {loading && rides.length > 0 && (
@@ -289,6 +367,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
+  },
+  headerButton: {
+    padding: 5,
   },
   title: {
     fontSize: 24,
@@ -328,10 +409,14 @@ const styles = StyleSheet.create({
     color: '#666',
     textAlign: 'center',
   },
-  rideCard: {
-    backgroundColor: '#f8f9fa',
+  swipeableContainer: {
     marginHorizontal: 16,
     marginBottom: 12,
+    borderRadius: 12,
+    overflow: 'hidden', // Ensures the delete button doesn't go beyond the card's bounds
+  },
+  rideCard: {
+    backgroundColor: '#f8f9fa',
     borderRadius: 12,
     padding: 16,
     shadowColor: '#000',
@@ -440,6 +525,21 @@ const styles = StyleSheet.create({
   loadMoreContainer: {
     paddingVertical: 16,
     alignItems: 'center',
+  },
+  deleteBox: {
+    backgroundColor: 'red',
+    justifyContent: 'center',
+    alignItems: 'flex-end',
+    paddingRight: 20,
+    borderRadius: 12,
+    marginBottom: 12, // Match rideCard's margin for spacing
+    width: 100, // Width of the swipeable area
+    alignSelf: 'flex-end',
+  },
+  deleteText: {
+    color: 'white',
+    fontWeight: '600',
+    marginTop: 5,
   },
 });
 

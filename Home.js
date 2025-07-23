@@ -30,6 +30,8 @@ import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import haversine from 'haversine-distance';
 import { serverTimestamp } from 'firebase/firestore';
+import { Modalize } from 'react-native-modalize';
+
 
 
 const OPENCAGE_API_KEY = 'a87b854ab508451da44974719031b90b';
@@ -64,14 +66,35 @@ export default function TravelDetailsScreen() {
   const [collapsed, setCollapsed] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [paymentModalVisible, setPaymentModalVisible] = useState(false);
+  const modalizeRef = useRef(null);
 
   // Driver selection states
   const [drivers, setDrivers] = useState([]);
   const [driversVisible, setDriversVisible] = useState(false);
   const [selectedDriver, setSelectedDriver] = useState(null);
   const [fetchingDrivers, setFetchingDrivers] = useState(false);
-
+  const [pricing, setPricing] = useState(null);
   const [paymentDone, setPaymentDone] = React.useState(false);
+
+// Refs for inputs to enable focusing on edit icon press
+  const pickupInputRef = useRef(null);
+  const dropoffInputRef = useRef(null);
+
+  const collapseSheet = () => {
+    modalizeRef.current?.snapToIndex(0);
+  };
+
+  // Call this to expand (snap to max height)
+  const expandSheet = () => {
+    modalizeRef.current?.snapToIndex(1);
+  };
+
+  // Whenever driver selected:
+  useEffect(() => {
+    if (selectedDriver) {
+      expandSheet();
+    }
+  }, [selectedDriver]);
   
 
   const bookRide = async (rideId, driverId, pickup, dropoff) => {
@@ -110,10 +133,7 @@ export default function TravelDetailsScreen() {
   }
 };
 
-  // Refs for inputs to enable focusing on edit icon press
-  const pickupInputRef = useRef(null);
-  const dropoffInputRef = useRef(null);
-
+ 
   const saveRideToFirestore = async () => {
     if (!auth.currentUser || !pickup || !dropoff || !price || !selectedTransport) return;
 
@@ -139,10 +159,42 @@ export default function TravelDetailsScreen() {
     }
   };
 
-  // Fixed fetchNearbyDrivers function
-  // Fixed fetchNearbyDrivers function
-// Fixed fetchNearbyDrivers function to handle nested vehicle info
-const fetchNearbyDrivers = async () => {
+  const fetchPricing = async () => {
+    try {
+      const docRef = doc(db, 'settings', 'pricing');
+      const docSnap = await getDoc(docRef);
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+
+        // Ensure prices are numbers
+        const safePricing = {
+          taxi: {
+            baseFare: Number(data?.taxi?.baseFare ?? 0),
+            pricePerKm: Number(data?.taxi?.pricePerKm ?? 0),
+          },
+          bus: {
+            baseFare: Number(data?.bus?.baseFare ?? 0),
+            pricePerKm: Number(data?.bus?.pricePerKm ?? 0),
+          },
+          van: {
+            baseFare: Number(data?.van?.baseFare ?? 0),
+            pricePerKm: Number(data?.van?.pricePerKm ?? 0),
+          },
+        };
+
+        setPricing(safePricing);
+      } else {
+        console.log('No pricing doc found!');
+      }
+    } catch (error) {
+      console.error('Error fetching pricing:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+
+  const fetchNearbyDrivers = async () => {
   if (!pickup) {
     Alert.alert('Pickup location not set');
     return;
@@ -160,61 +212,71 @@ const fetchNearbyDrivers = async () => {
       const driverData = driverDoc.data();
       const driverId = driverDoc.id;
       
-      // Fetch vehicle info from the nested vehicleInfo subcollection
-      let vehicleDetails = {
-        make: 'Unknown Make',
-        model: 'Unknown Model',
-        year: 'Unknown Year',
-        color: 'Unknown Color',
-        licensePlate: 'Unknown Plate',
-        vehicleType: 'car'
+      console.log('Processing driver:', driverId, driverData); // Debug log
+      
+      // Extract vehicle info from the vehicleInfo object (not subcollection)
+      const vehicleInfo = driverData.vehicleInfo || {};
+      
+      const vehicleDetails = {
+        make: vehicleInfo.make || 'Unknown Make',
+        model: vehicleInfo.model || 'Unknown Model',
+        year: vehicleInfo.year || 'Unknown Year',
+        color: vehicleInfo.color || 'Unknown Color',
+        licensePlate: vehicleInfo.plateNumber || vehicleInfo.licensePlate || 'Unknown Plate',
+        vehicleType: vehicleInfo.vehicleType || 'car',
+        capacity: vehicleInfo.capacity || 4,
+        fuelType: vehicleInfo.fuelType || 'Unknown',
       };
 
+      // Fetch driver's personal info from users collection using uid
+      let driverPersonalInfo = {
+        firstname: 'Unknown',
+        lastname: 'Driver',
+        email: '',
+        phone: '',
+        profileImage: null,
+      };
+
+    if (driverId) {  // Use the document ID directly
       try {
-        // Get all documents from the vehicleInfo subcollection
-        const vehicleInfoRef = collection(db, 'drivers', driverId, 'vehicleInfo');
-        const vehicleSnapshot = await getDocs(vehicleInfoRef);
-        
-        if (!vehicleSnapshot.empty) {
-          // If there are multiple vehicle documents, take the first one
-          // Or you could modify this logic to handle multiple vehicles
-          const vehicleDoc = vehicleSnapshot.docs[0];
-          const vehicleData = vehicleDoc.data();
-          
-          vehicleDetails = {
-            make: vehicleData.make || 'Unknown Make',
-            model: vehicleData.model || 'Unknown Model',
-            year: vehicleData.year || 'Unknown Year',
-            color: vehicleData.color || 'Unknown Color',
-            licensePlate: vehicleData.licensePlate || vehicleData.plateNumber || 'Unknown Plate',
-            vehicleType: vehicleData.vehicleType || vehicleData.type || 'car',
-            // Add any other vehicle fields you have
-            capacity: vehicleData.capacity || 4,
-            fuelType: vehicleData.fuelType || 'Unknown',
-          };
-        }
-      } catch (vehicleError) {
-        console.error(`Error fetching vehicle info for driver ${driverId}:`, vehicleError);
-        // vehicleDetails will use default values
-      }
+        const userDocRef = doc(db, 'users', driverId);  // Use driverId instead of driverData.uid
+        const userDocSnap = await getDoc(userDocRef);
+    
+    if (userDocSnap.exists()) {
+      const userData = userDocSnap.data();
+      driverPersonalInfo = {
+        firstname: userData.firstname || 'Unknown',
+        lastname: userData.lastname || 'Driver',
+        email: userData.email || '',
+        phone: userData.phone || '',
+        profileImage: userData.profileImage || userData.photoURL || null,
+      };
+      console.log('Found user data for driver:', driverId, userData);
+    } else {
+      console.log('No user document found for driver id:', driverId);
+    }
+  } catch (userError) {
+    console.error(`Error fetching user info for driver ${driverId}:`, userError);
+  }
+}
 
       // Create complete driver object
       const driverInfo = {
         id: driverId,
-        // Personal details from drivers collection
-        name: driverData.firstname && driverData.lastname 
-          ? `${driverData.firstname} ${driverData.lastname}` 
-          : driverData.name || 'Unknown Driver',
-        email: driverData.email || '',
-        phone: driverData.phone || '',
-        profileImage: driverData.profileImage || driverData.photoURL || null,
+        // Personal details from users collection
+        name: `${driverPersonalInfo.firstname} ${driverPersonalInfo.lastname}`.trim(),
+        firstname: driverPersonalInfo.firstname,
+        lastname: driverPersonalInfo.lastname,
+        email: driverPersonalInfo.email,
+        phone: driverPersonalInfo.phone,
+        profileImage: driverPersonalInfo.profileImage,
         
-        // Driver-specific details
+        // Driver-specific details from drivers collection
         rating: driverData.rating || 4.5,
         
-        // Vehicle details from nested collection
+        // Vehicle details from vehicleInfo object
         vehicle: `${vehicleDetails.year} ${vehicleDetails.make} ${vehicleDetails.model}`.trim(),
-        vehicleDetails: vehicleDetails, // Store complete vehicle info
+        vehicleDetails: vehicleDetails,
         vehicleType: vehicleDetails.vehicleType,
         licensePlate: vehicleDetails.licensePlate,
         
@@ -226,41 +288,33 @@ const fetchNearbyDrivers = async () => {
         // Additional driver info
         createdAt: driverData.createdAt || null,
         uid: driverData.uid || driverId,
+        licenseNumber: driverData.licenseNumber || 'Unknown License',
+        vehicleRegistration: driverData.vehicleRegistration || 'Unknown Registration',
+        lastUpdated: driverData.lastUpdated || null,
       };
 
       driversFromFirestore.push(driverInfo);
     }
+
+    console.log('Drivers from Firestore:', driversFromFirestore); // Debug log
 
     // Filter drivers that have location data and are available
     const driversWithLocation = driversFromFirestore.filter(driver => {
       return driver.latitude && driver.longitude && driver.isAvailable;
     });
 
-    // If no drivers have location data, show mock drivers nearby (for testing)
+    // If no drivers have location data, show all available drivers nearby (for testing)
     let finalDrivers = driversWithLocation;
     if (driversWithLocation.length === 0) {
-      console.log('No drivers with location found, creating mock drivers nearby');
+      console.log('No drivers with location found, using mock locations for available drivers');
       
-      // Create mock drivers near the pickup location for testing
-      const mockDrivers = driversFromFirestore.slice(0, 3).map((driver, index) => ({
+      // Use the actual drivers but give them mock locations near pickup for testing
+    const availableDrivers = driversFromFirestore.filter(driver => driver.isAvailable);
+    finalDrivers = availableDrivers.map((driver, index) => ({
         ...driver,
         latitude: pickup.latitude + (Math.random() - 0.5) * 0.01,
         longitude: pickup.longitude + (Math.random() - 0.5) * 0.01,
-        isAvailable: true,
-        name: driver.name || `Driver ${index + 1}`,
-        vehicle: driver.vehicle || `2022 Toyota Camry`, // Better mock data
-        rating: driver.rating || (4.0 + Math.random()).toFixed(1),
-        vehicleDetails: {
-          make: 'Toyota',
-          model: 'Camry',
-          year: '2022',
-          color: ['White', 'Black', 'Silver'][index] || 'White',
-          licensePlate: `ABC-${1000 + index}`,
-          vehicleType: 'sedan',
-        },
       }));
-      
-      finalDrivers = mockDrivers;
     } else {
       // Filter drivers by distance (within 10 km of pickup)
       finalDrivers = driversWithLocation.filter(driver => {
@@ -277,7 +331,7 @@ const fetchNearbyDrivers = async () => {
       return;
     }
 
-    console.log('Final drivers with vehicle details:', finalDrivers);
+    console.log('Final drivers with actual data:', finalDrivers);
     setDrivers(finalDrivers);
     setDriversVisible(true);
     
@@ -288,6 +342,11 @@ const fetchNearbyDrivers = async () => {
     setFetchingDrivers(false);
   }
 };
+
+useEffect(() => {
+    fetchPricing();
+  }, []);
+
   useEffect(() => {
     const checkUserStatus = async () => {
       if (!auth.currentUser) return;
@@ -405,8 +464,13 @@ const fetchNearbyDrivers = async () => {
       setTravelTime(Math.round(summary.duration / 60));
       setDistance((summary.distance / 1000).toFixed(2));
 
-      const ratePerKm = { taxi: 1.5, bus: 0.8, van: 1.2 };
-      setPrice((summary.distance / 1000 * ratePerKm[selectedTransport]).toFixed(2));
+      if (pricing && pricing[selectedTransport]) {
+       setPrice((summary.distance / 1000 * pricing[selectedTransport]).toFixed(2));
+      } else {
+      const fallbackPricing = { taxi: 2.5, bus: 1.0, van: 3.0 };
+        setPrice((summary.distance / 1000 * fallbackPricing[selectedTransport]).toFixed(2));
+      }
+
 
       const geometry = data.routes[0].geometry;
       const decoded = polyline.decode(geometry).map(([lat, lng]) => ({ latitude: lat, longitude: lng }));
@@ -466,7 +530,7 @@ const fetchNearbyDrivers = async () => {
     </TouchableOpacity>
   );
 
-  const onConfirmOrder = () => {
+  const onConfirmOrder = async () => {
   if (!pickup || !dropoff) {
     Alert.alert('Missing Details', 'Please set both pickup and dropoff locations');
     return;
@@ -486,9 +550,10 @@ const fetchNearbyDrivers = async () => {
     return;
   }
 
-  fetchNearbyDrivers();
-};
-
+    // Fetch nearby drivers
+    await fetchNearbyDrivers();
+  };
+ 
 
  // Updated renderDriverItem to show detailed vehicle information
 const renderDriverItem = ({ item }) => {
@@ -598,39 +663,46 @@ const renderDriverItem = ({ item }) => {
         <MapView style={StyleSheet.absoluteFillObject} region={region} showsUserLocation>
           {pickup && <Marker coordinate={pickup} pinColor="green" />}
           {dropoff && <Marker coordinate={dropoff} pinColor="red" />}
+          {routeCoords.length > 0 && (
+            <Polyline
+              coordinates={routeCoords}
+              strokeColor="#FFA500"
+              strokeWidth={3}
+            />
+          )}
           
           {drivers.map((driver) => {
-  const vehicleDetails = driver.vehicleDetails || {};
+            const vehicleDetails = driver.vehicleDetails || {};
   
   return (
-    <Marker
-      key={driver.id}
-      coordinate={{ latitude: driver.latitude, longitude: driver.longitude }}
-      title={driver.name}
-      description={`${driver.vehicle} • ${vehicleDetails.color} • ⭐ ${driver.rating}`}
-    >
-      {/* Custom marker icon based on vehicle type */}
-      <View style={{
-        backgroundColor: '#FFA500',
-        padding: 8,
-        borderRadius: 20,
-        borderWidth: 2,
-        borderColor: '#fff',
-      }}>
-        <Ionicons 
-          name={
-            vehicleDetails.vehicleType === 'sedan' ? 'car-sport' :
-            vehicleDetails.vehicleType === 'suv' ? 'car' :
-            vehicleDetails.vehicleType === 'van' ? 'bus' :
-            'car-outline'
-          } 
-          size={20} 
-          color="#fff" 
-        />
-      </View>
-    </Marker>
-  );
-   })}
+              <Marker
+                key={driver.id}
+                coordinate={{ latitude: driver.latitude, longitude: driver.longitude }}
+                title={driver.name}
+                description={`${driver.vehicle} • ${vehicleDetails.color} • ⭐ ${driver.rating}`}
+              >
+                {/* Custom marker icon based on vehicle type */}
+                <View style={{
+                  backgroundColor: '#FFA500',
+                  padding: 8,
+                  borderRadius: 20,
+                  borderWidth: 2,
+                  borderColor: '#fff',
+                }}>
+                  <Ionicons 
+                    name={
+                      vehicleDetails.vehicleType === 'sedan' ? 'car-sport' :
+                      vehicleDetails.vehicleType === 'suv' ? 'car' :
+                      vehicleDetails.vehicleType === 'van' ? 'bus' :
+                      'car-outline'
+                    } 
+                    size={20} 
+                    color="#fff" 
+                  />
+                </View>
+              </Marker>
+            );
+          })}
         </MapView>
       )}
 
@@ -648,22 +720,22 @@ const renderDriverItem = ({ item }) => {
             showsVerticalScrollIndicator={false}
             contentContainerStyle={{ paddingBottom: 30 }}
           >
-           {distance && travelTime && price && (
-  <View style={styles.infoRow}>
-    <View style={styles.infoBox}>
-      <Ionicons name="navigate-outline" size={18} color="#FFA500" />
-      <Text style={styles.infoText}>{distance} km</Text>
-    </View>
-    <View style={styles.infoBox}>
-      <Ionicons name="time-outline" size={18} color="#FFA500" />
-      <Text style={styles.infoText}>{travelTime} min ETA</Text>
-    </View>
-    <View style={styles.infoBox}>
-      <Ionicons name="cash-outline" size={18} color="#FFA500" />
-      <Text style={styles.infoText}>${price}</Text>
-    </View>
-  </View>
-)}
+            {distance && travelTime && price && (
+              <View style={styles.infoRow}>
+                <View style={styles.infoBox}>
+                  <Ionicons name="navigate-outline" size={18} color="#FFA500" />
+                  <Text style={styles.infoText}>{distance} km</Text>
+                </View>
+                <View style={styles.infoBox}>
+                  <Ionicons name="time-outline" size={18} color="#FFA500" />
+                  <Text style={styles.infoText}>{travelTime} min ETA</Text>
+                </View>
+                <View style={styles.infoBox}>
+                  <Ionicons name="cash-outline" size={18} color="#FFA500" />
+                  <Text style={styles.infoText}>${price}</Text>
+                </View>
+              </View>
+            )}
 
 
             <View style={styles.inputContainer}>
@@ -907,7 +979,7 @@ const renderDriverItem = ({ item }) => {
                 style={[styles.modalButton, { backgroundColor: '#FFA500' }]}
                 disabled={!selectedDriver}
                 onPress={() => {
-                  Alert.alert('Driver Selected', `You selected ${selectedDriver?.name}.`);
+                 Alert.alert('Driver Selected', `You selected ${selectedDriver?.firstname}.`);
                   setDriversVisible(false);
 
                   setDriverLocation({

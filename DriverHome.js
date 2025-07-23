@@ -303,16 +303,33 @@ const styles = createStyles(isDarkMode);
     const rideRef = doc(db, 'rides', rideId);
 
     try {
-      // Instead of marking as declined, just remove from this driver's view
-      // The ride remains pending for other drivers
-      Alert.alert('Declined', 'Ride removed from your list.');
-      
+      // Use a transaction to ensure atomicity in case of concurrent updates
+      await runTransaction(db, async (transaction) => {
+        const rideDoc = await transaction.get(rideRef);
+        if (!rideDoc.exists()) {
+          throw 'Ride does not exist!';
+        }
+
+        // Optional: Check current status if you only want to decline 'pending' rides
+        // if (rideDoc.data().status !== 'pending') {
+        //   throw 'Ride is not in a pending state to be declined.';
+        // }
+
+        transaction.update(rideRef, {
+          status: 'declined',
+          declinedBy: driverId, // Record which driver declined it
+          declinedAt: serverTimestamp(), // Record when it was declined
+        });
+      });
+
+      Alert.alert('Success', 'Ride has been declined and removed from your list.');
+
       // Remove from local state
       setRides(prev => prev.filter(ride => ride.id !== rideId));
       
     } catch (error) {
       console.error('Decline ride error:', error);
-      Alert.alert('Error', 'Failed to decline ride');
+      Alert.alert('Error', error.toString());
     }
   };
 

@@ -6,6 +6,7 @@ import ManageDrivers from './ManageDrivers';
 import ManageRiders from './ManageRiders';
 import RideAnalytics from './RideAnalytics';
 import ManageUsers from './ManageUsers';
+import Settings from './Settings';
 
 export default function App() {
   const [isAdmin, setIsAdmin] = useState(false);
@@ -56,6 +57,12 @@ export default function App() {
             active={page === 'analytics'}
             onClick={() => setPage('analytics')}
           />
+          <NavButton
+            label="Settings"
+            active={page === 'settings'}
+            onClick={() => setPage('settings')}
+          />
+
         </nav>
 
         <section style={styles.content}>
@@ -64,6 +71,7 @@ export default function App() {
           {page === 'trips' && <ViewTrips />}
           {page === 'users' && <ManageUsers />}
           {page === 'analytics' && <RideAnalytics />}
+          {page === 'settings' && <Settings />}
         </section>
       </div>
     </div>
