@@ -24,19 +24,16 @@ import polyline from '@mapbox/polyline';
 import SettingsPanel from './SettingsPanel';
 import SettingsScreen from './SettingsScreen';
 import { useTheme } from './ThemeContext';
-import { collection, query, where, getDocs, doc, getDoc, addDoc } from 'firebase/firestore';
-import { db, auth } from './firebaseConfig';  // Adjust path if needed
+import { collection, query, where, getDocs, doc, getDoc, addDoc, setDoc, onSnapshot } from 'firebase/firestore';
+import { db, auth } from './firebaseConfig';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import haversine from 'haversine-distance';
 import { serverTimestamp } from 'firebase/firestore';
 import { Modalize } from 'react-native-modalize';
 
-
-
 const OPENCAGE_API_KEY = 'a87b854ab508451da44974719031b90b';
-const OPENROUTESERVICE_API_KEY =
-  'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjllZjJjN2YyMTI1NTQ1YWI5NzJhZmYxMjBmNjhkMTg5IiwiaCI6Im11cm11cjY0In0=';
+const OPENROUTESERVICE_API_KEY = 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjllZjJjN2YyMTI1NTQ1YWI5NzJhZmYxMjBmNjhkMTg5IiwiaCI6Im11cm11cjY0In0=';
 
 export default function TravelDetailsScreen() {
   const navigation = useNavigation();
@@ -68,6 +65,12 @@ export default function TravelDetailsScreen() {
   const [paymentModalVisible, setPaymentModalVisible] = useState(false);
   const modalizeRef = useRef(null);
 
+  // Driver tracking states
+  const [rideStatus, setRideStatus] = useState(null);
+  const [currentRideId, setCurrentRideId] = useState(null);
+  const [driverLocationUpdates, setDriverLocationUpdates] = useState(null);
+  const [trackingEta, setTrackingEta] = useState(null);
+
   // Driver selection states
   const [drivers, setDrivers] = useState([]);
   const [driversVisible, setDriversVisible] = useState(false);
@@ -76,7 +79,7 @@ export default function TravelDetailsScreen() {
   const [pricing, setPricing] = useState(null);
   const [paymentDone, setPaymentDone] = React.useState(false);
 
-// Refs for inputs to enable focusing on edit icon press
+  // Refs for inputs
   const pickupInputRef = useRef(null);
   const dropoffInputRef = useRef(null);
 
@@ -84,78 +87,142 @@ export default function TravelDetailsScreen() {
     modalizeRef.current?.snapToIndex(0);
   };
 
-  // Call this to expand (snap to max height)
   const expandSheet = () => {
     modalizeRef.current?.snapToIndex(1);
   };
 
-  // Whenever driver selected:
   useEffect(() => {
     if (selectedDriver) {
       expandSheet();
     }
   }, [selectedDriver]);
-  
+
+  // Track driver location when ride is in progress
+  useEffect(() => {
+    if (!currentRideId || !selectedDriver) return;
+
+    const unsubscribe = onSnapshot(doc(db, 'rides', currentRideId), (doc) => {
+      const rideData = doc.data();
+      setRideStatus(rideData.status);
+      
+      if (rideData.status === 'in-progress' && rideData.driverLocation) {
+        setDriverLocationUpdates(rideData.driverLocation);
+        const eta = calculateEta(rideData.driverLocation, pickup);
+        setTrackingEta(eta);
+        
+        // Update map region to show both user and driver
+        if (pickup) {
+          const centerLat = (rideData.driverLocation.latitude + pickup.latitude) / 2;
+          const centerLng = (rideData.driverLocation.longitude + pickup.longitude) / 2;
+          const deltaLat = Math.abs(rideData.driverLocation.latitude - pickup.latitude) * 1.5 || 0.05;
+          const deltaLng = Math.abs(rideData.driverLocation.longitude - pickup.longitude) * 1.5 || 0.05;
+          setRegion({ latitude: centerLat, longitude: centerLng, latitudeDelta: deltaLat, longitudeDelta: deltaLng });
+        }
+      }
+    });
+
+    return () => unsubscribe();
+  }, [currentRideId, selectedDriver, pickup]);
+
+  const calculateEta = (driverLoc, pickupLoc) => {
+    if (!driverLoc || !pickupLoc) return '--';
+    const distanceKm = haversine(driverLoc, pickupLoc) / 1000;
+    const etaMinutes = Math.round((distanceKm / 40) * 60); // 40 km/h average speed
+    return etaMinutes < 1 ? '<1' : etaMinutes;
+  };
 
   const bookRide = async (rideId, driverId, pickup, dropoff) => {
-  const userId = auth.currentUser.uid;
-
-  try {
-    // 1. Create ride document (your existing logic)
-    await setDoc(doc(db, 'rides', rideId), {
-      rideId,
-      userId,
-      driverId,
-      pickup,
-      dropoff,
-      status: 'pending',
-      timestamp: serverTimestamp(),
-    });
-
-    // 2. Create chat document
-    await setDoc(doc(db, 'chats', rideId), {
-      rideId,
-      userId,
-      driverId,
-    });
-
-    // 3. Add welcome message from user
-    await addDoc(collection(db, 'chats', rideId, 'messages'), {
-      senderId: userId,
-      text: 'Hi driver, I’ve just booked the ride!',
-      timestamp: serverTimestamp(),
-    });
-
-    console.log('Ride and chat initialized successfully!');
-  } catch (error) {
-    console.error('Booking error:', error);
-    Alert.alert('Booking Failed', 'Please try again.');
-  }
-};
-
- 
-  const saveRideToFirestore = async () => {
-    if (!auth.currentUser || !pickup || !dropoff || !price || !selectedTransport) return;
+    const userId = auth.currentUser.uid;
 
     try {
-      const rideData = {
-        userId: auth.currentUser.uid,
-        pickup,
-        dropoff,
+      // Create ride document
+      await setDoc(doc(db, 'rides', rideId), {
+        rideId,
+        userId,
+        driverId,
+        pickup: {
+          name: pickup.address,
+          latitude: pickup.latitude,
+          longitude: pickup.longitude,
+          address: pickup.address
+        },
+        dropoff: {
+          name: dropoff.address,
+          latitude: dropoff.latitude,
+          longitude: dropoff.longitude,
+          address: dropoff.address
+        },
         price: parseFloat(price),
         distance: parseFloat(distance),
         transport: selectedTransport,
         paymentMethod,
-        timestamp: new Date().toISOString(),
+        timestamp: serverTimestamp(),
         status: 'pending',
+        travelTime: travelTime,
+        createdAt: serverTimestamp()
+      });
+
+      // Create chat document
+      await setDoc(doc(db, 'chats', rideId), {
+        rideId,
+        userId,
+        driverId,
+      });
+
+      // Add welcome message
+      await addDoc(collection(db, 'chats', rideId, 'messages'), {
+        senderId: userId,
+        text: 'Hi driver, I\'ve just booked the ride!',
+        timestamp: serverTimestamp(),
+      });
+
+      console.log('Ride and chat initialized successfully!');
+      return true;
+    } catch (error) {
+      console.error('Booking error:', error);
+      Alert.alert('Booking Failed', 'Please try again.');
+      return false;
+    }
+  };
+
+  const saveRideToFirestore = async () => {
+    if (!auth.currentUser || !pickup || !dropoff || !price || !selectedTransport) return null;
+
+    try {
+      const rideId = doc(collection(db, 'rides')).id;
+      
+      const rideData = {
+        rideId,
+        userId: auth.currentUser.uid,
+        pickup: {
+          name: pickup.address,
+          latitude: pickup.latitude,
+          longitude: pickup.longitude,
+          address: pickup.address
+        },
+        dropoff: {
+          name: dropoff.address,
+          latitude: dropoff.latitude,
+          longitude: dropoff.longitude,
+          address: dropoff.address
+        },
+        price: parseFloat(price),
+        distance: parseFloat(distance),
+        transport: selectedTransport,
+        paymentMethod,
+        timestamp: serverTimestamp(),
+        status: 'pending',
+        travelTime: travelTime,
+        createdAt: serverTimestamp()
       };
 
-      const docRef = await addDoc(collection(db, 'rides'), rideData);
-      console.log('Ride saved with ID:', docRef.id);
-      return docRef.id;
+      await setDoc(doc(db, 'rides', rideId), rideData);
+      console.log('Ride saved with ID:', rideId);
+      return rideId;
     } catch (error) {
       console.error('Error saving ride:', error);
       Alert.alert('Error', 'Could not save ride to Firestore');
+      return null;
     }
   };
 
@@ -165,8 +232,6 @@ export default function TravelDetailsScreen() {
       const docSnap = await getDoc(docRef);
       if (docSnap.exists()) {
         const data = docSnap.data();
-
-        // Ensure prices are numbers
         const safePricing = {
           taxi: {
             baseFare: Number(data?.taxi?.baseFare ?? 0),
@@ -181,7 +246,6 @@ export default function TravelDetailsScreen() {
             pricePerKm: Number(data?.van?.pricePerKm ?? 0),
           },
         };
-
         setPricing(safePricing);
       } else {
         console.log('No pricing doc found!');
@@ -193,157 +257,123 @@ export default function TravelDetailsScreen() {
     }
   };
 
-
   const fetchNearbyDrivers = async () => {
-  if (!pickup) {
-    Alert.alert('Pickup location not set');
-    return;
-  }
-  setFetchingDrivers(true);
-  try {
-    // Get drivers from the drivers collection
-    const driversRef = collection(db, 'drivers');
-    const querySnapshot = await getDocs(driversRef);
-
-    const driversFromFirestore = [];
-
-    // Process each driver document
-    for (const driverDoc of querySnapshot.docs) {
-      const driverData = driverDoc.data();
-      const driverId = driverDoc.id;
-      
-      console.log('Processing driver:', driverId, driverData); // Debug log
-      
-      // Extract vehicle info from the vehicleInfo object (not subcollection)
-      const vehicleInfo = driverData.vehicleInfo || {};
-      
-      const vehicleDetails = {
-        make: vehicleInfo.make || 'Unknown Make',
-        model: vehicleInfo.model || 'Unknown Model',
-        year: vehicleInfo.year || 'Unknown Year',
-        color: vehicleInfo.color || 'Unknown Color',
-        licensePlate: vehicleInfo.plateNumber || vehicleInfo.licensePlate || 'Unknown Plate',
-        vehicleType: vehicleInfo.vehicleType || 'car',
-        capacity: vehicleInfo.capacity || 4,
-        fuelType: vehicleInfo.fuelType || 'Unknown',
-      };
-
-      // Fetch driver's personal info from users collection using uid
-      let driverPersonalInfo = {
-        firstname: 'Unknown',
-        lastname: 'Driver',
-        email: '',
-        phone: '',
-        profileImage: null,
-      };
-
-    if (driverId) {  // Use the document ID directly
-      try {
-        const userDocRef = doc(db, 'users', driverId);  // Use driverId instead of driverData.uid
-        const userDocSnap = await getDoc(userDocRef);
-    
-    if (userDocSnap.exists()) {
-      const userData = userDocSnap.data();
-      driverPersonalInfo = {
-        firstname: userData.firstname || 'Unknown',
-        lastname: userData.lastname || 'Driver',
-        email: userData.email || '',
-        phone: userData.phone || '',
-        profileImage: userData.profileImage || userData.photoURL || null,
-      };
-      console.log('Found user data for driver:', driverId, userData);
-    } else {
-      console.log('No user document found for driver id:', driverId);
-    }
-  } catch (userError) {
-    console.error(`Error fetching user info for driver ${driverId}:`, userError);
-  }
-}
-
-      // Create complete driver object
-      const driverInfo = {
-        id: driverId,
-        // Personal details from users collection
-        name: `${driverPersonalInfo.firstname} ${driverPersonalInfo.lastname}`.trim(),
-        firstname: driverPersonalInfo.firstname,
-        lastname: driverPersonalInfo.lastname,
-        email: driverPersonalInfo.email,
-        phone: driverPersonalInfo.phone,
-        profileImage: driverPersonalInfo.profileImage,
-        
-        // Driver-specific details from drivers collection
-        rating: driverData.rating || 4.5,
-        
-        // Vehicle details from vehicleInfo object
-        vehicle: `${vehicleDetails.year} ${vehicleDetails.make} ${vehicleDetails.model}`.trim(),
-        vehicleDetails: vehicleDetails,
-        vehicleType: vehicleDetails.vehicleType,
-        licensePlate: vehicleDetails.licensePlate,
-        
-        // Location data
-        latitude: driverData.latitude || null,
-        longitude: driverData.longitude || null,
-        isAvailable: driverData.isAvailable !== false,
-        
-        // Additional driver info
-        createdAt: driverData.createdAt || null,
-        uid: driverData.uid || driverId,
-        licenseNumber: driverData.licenseNumber || 'Unknown License',
-        vehicleRegistration: driverData.vehicleRegistration || 'Unknown Registration',
-        lastUpdated: driverData.lastUpdated || null,
-      };
-
-      driversFromFirestore.push(driverInfo);
-    }
-
-    console.log('Drivers from Firestore:', driversFromFirestore); // Debug log
-
-    // Filter drivers that have location data and are available
-    const driversWithLocation = driversFromFirestore.filter(driver => {
-      return driver.latitude && driver.longitude && driver.isAvailable;
-    });
-
-    // If no drivers have location data, show all available drivers nearby (for testing)
-    let finalDrivers = driversWithLocation;
-    if (driversWithLocation.length === 0) {
-      console.log('No drivers with location found, using mock locations for available drivers');
-      
-      // Use the actual drivers but give them mock locations near pickup for testing
-    const availableDrivers = driversFromFirestore.filter(driver => driver.isAvailable);
-    finalDrivers = availableDrivers.map((driver, index) => ({
-        ...driver,
-        latitude: pickup.latitude + (Math.random() - 0.5) * 0.01,
-        longitude: pickup.longitude + (Math.random() - 0.5) * 0.01,
-      }));
-    } else {
-      // Filter drivers by distance (within 10 km of pickup)
-      finalDrivers = driversWithLocation.filter(driver => {
-        const distanceKm = haversine(
-          { latitude: driver.latitude, longitude: driver.longitude },
-          { latitude: pickup.latitude, longitude: pickup.longitude }
-        ) / 1000;
-        return distanceKm <= 10;
-      });
-    }
-
-    if (finalDrivers.length === 0) {
-      Alert.alert('No available drivers found nearby.');
+    if (!pickup) {
+      Alert.alert('Pickup location not set');
       return;
     }
+    setFetchingDrivers(true);
+    try {
+      const driversRef = collection(db, 'drivers');
+      const querySnapshot = await getDocs(driversRef);
 
-    console.log('Final drivers with actual data:', finalDrivers);
-    setDrivers(finalDrivers);
-    setDriversVisible(true);
-    
-  } catch (error) {
-    console.error('Error fetching drivers:', error);
-    Alert.alert('Error fetching drivers', error.message);
-  } finally {
-    setFetchingDrivers(false);
-  }
-};
+      const driversFromFirestore = [];
+      for (const driverDoc of querySnapshot.docs) {
+        const driverData = driverDoc.data();
+        const driverId = driverDoc.id;
+        const vehicleInfo = driverData.vehicleInfo || {};
+        
+        const vehicleDetails = {
+          make: vehicleInfo.make || 'Unknown Make',
+          model: vehicleInfo.model || 'Unknown Model',
+          year: vehicleInfo.year || 'Unknown Year',
+          color: vehicleInfo.color || 'Unknown Color',
+          licensePlate: vehicleInfo.plateNumber || vehicleInfo.licensePlate || 'Unknown Plate',
+          vehicleType: vehicleInfo.vehicleType || 'car',
+          capacity: vehicleInfo.capacity || 4,
+          fuelType: vehicleInfo.fuelType || 'Unknown',
+        };
 
-useEffect(() => {
+        let driverPersonalInfo = {
+          firstname: 'Unknown',
+          lastname: 'Driver',
+          email: '',
+          phone: '',
+          profileImage: null,
+        };
+
+        if (driverId) {
+          try {
+            const userDocRef = doc(db, 'users', driverId);
+            const userDocSnap = await getDoc(userDocRef);
+            if (userDocSnap.exists()) {
+              const userData = userDocSnap.data();
+              driverPersonalInfo = {
+                firstname: userData.firstname || 'Unknown',
+                lastname: userData.lastname || 'Driver',
+                email: userData.email || '',
+                phone: userData.phone || '',
+                profileImage: userData.profileImage || userData.photoURL || null,
+              };
+            }
+          } catch (userError) {
+            console.error(`Error fetching user info for driver ${driverId}:`, userError);
+          }
+        }
+
+        const driverInfo = {
+          id: driverId,
+          name: `${driverPersonalInfo.firstname} ${driverPersonalInfo.lastname}`.trim(),
+          firstname: driverPersonalInfo.firstname,
+          lastname: driverPersonalInfo.lastname,
+          email: driverPersonalInfo.email,
+          phone: driverPersonalInfo.phone,
+          profileImage: driverPersonalInfo.profileImage,
+          rating: driverData.rating || 4.5,
+          vehicle: `${vehicleDetails.year} ${vehicleDetails.make} ${vehicleDetails.model}`.trim(),
+          vehicleDetails: vehicleDetails,
+          vehicleType: vehicleDetails.vehicleType,
+          licensePlate: vehicleDetails.licensePlate,
+          latitude: driverData.latitude || null,
+          longitude: driverData.longitude || null,
+          isAvailable: driverData.isAvailable !== false,
+          uid: driverData.uid || driverId,
+          licenseNumber: driverData.licenseNumber || 'Unknown License',
+          vehicleRegistration: driverData.vehicleRegistration || 'Unknown Registration',
+        };
+
+        driversFromFirestore.push(driverInfo);
+      }
+
+      const driversWithLocation = driversFromFirestore.filter(driver => {
+        return driver.latitude && driver.longitude && driver.isAvailable;
+      });
+
+      let finalDrivers = driversWithLocation;
+      if (driversWithLocation.length === 0) {
+        const availableDrivers = driversFromFirestore.filter(driver => driver.isAvailable);
+        finalDrivers = availableDrivers.map((driver, index) => ({
+            ...driver,
+            latitude: pickup.latitude + (Math.random() - 0.5) * 0.01,
+            longitude: pickup.longitude + (Math.random() - 0.5) * 0.01,
+          }));
+      } else {
+        finalDrivers = driversWithLocation.filter(driver => {
+          const distanceKm = haversine(
+            { latitude: driver.latitude, longitude: driver.longitude },
+            { latitude: pickup.latitude, longitude: pickup.longitude }
+          ) / 1000;
+          return distanceKm <= 10;
+        });
+      }
+
+      if (finalDrivers.length === 0) {
+        Alert.alert('No available drivers found nearby.');
+        return;
+      }
+
+      setDrivers(finalDrivers);
+      setDriversVisible(true);
+      
+    } catch (error) {
+      console.error('Error fetching drivers:', error);
+      Alert.alert('Error fetching drivers', error.message);
+    } finally {
+      setFetchingDrivers(false);
+    }
+  };
+
+  useEffect(() => {
     fetchPricing();
   }, []);
 
@@ -464,13 +494,10 @@ useEffect(() => {
       setTravelTime(Math.round(summary.duration / 60));
       setDistance((summary.distance / 1000).toFixed(2));
 
-      if (pricing && pricing[selectedTransport]) {
-       setPrice((summary.distance / 1000 * pricing[selectedTransport]).toFixed(2));
-      } else {
-      const fallbackPricing = { taxi: 2.5, bus: 1.0, van: 3.0 };
-        setPrice((summary.distance / 1000 * fallbackPricing[selectedTransport]).toFixed(2));
-      }
-
+      const base = pricing[selectedTransport].baseFare;
+      const perKm = pricing[selectedTransport].pricePerKm;
+      const calculatedPrice = base + (summary.distance / 1000 * perKm);
+      setPrice(calculatedPrice.toFixed(2));
 
       const geometry = data.routes[0].geometry;
       const decoded = polyline.decode(geometry).map(([lat, lng]) => ({ latitude: lat, longitude: lng }));
@@ -531,105 +558,96 @@ useEffect(() => {
   );
 
   const onConfirmOrder = async () => {
-  if (!pickup || !dropoff) {
-    Alert.alert('Missing Details', 'Please set both pickup and dropoff locations');
-    return;
-  }
+    if (!pickup || !dropoff) {
+      Alert.alert('Missing Details', 'Please set both pickup and dropoff locations');
+      return;
+    }
 
-  if (!paymentDone) {
-    Alert.alert(
-      'Payment Required',
-      'Please select a payment method before confirming your order.',
-      [
-        {
-          text: 'OK',
-          onPress: () => setPaymentModalVisible(true),
-        },
-      ]
-    );
-    return;
-  }
+    if (!paymentDone) {
+      Alert.alert(
+        'Payment Required',
+        'Please select a payment method before confirming your order.',
+        [
+          {
+            text: 'OK',
+            onPress: () => setPaymentModalVisible(true),
+          },
+        ]
+      );
+      return;
+    }
 
-    // Fetch nearby drivers
     await fetchNearbyDrivers();
   };
- 
 
- // Updated renderDriverItem to show detailed vehicle information
-const renderDriverItem = ({ item }) => {
-  const isSelected = selectedDriver?.id === item.id;
-  const vehicleDetails = item.vehicleDetails || {};
-  
-  return (
-    <TouchableOpacity
-      style={[styles.driverItem, isSelected && styles.driverItemSelected]}
-      onPress={() => setSelectedDriver(item)}
-    >
-      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-        {/* Driver Profile Image */}
-        {item.profileImage || item.photoURL ? (
-          <Image
-            source={{ uri: item.profileImage || item.photoURL }}
-            style={{ width: 50, height: 50, borderRadius: 25, marginRight: 12 }}
-          />
-        ) : (
-          <Ionicons
-            name="person-circle-outline"
-            size={50}
-            color="#ccc"
-            style={{ marginRight: 12 }}
-          />
-        )}
-        
-        {/* Driver and Vehicle Information */}
-        <View style={{ flex: 1 }}>
-          {/* Driver Name and Rating */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-            <Text style={[styles.driverName, isSelected && { color: '#fff' }]}>
-              {item.name}
+  const renderDriverItem = ({ item }) => {
+    const isSelected = selectedDriver?.id === item.id;
+    const vehicleDetails = item.vehicleDetails || {};
+    
+    return (
+      <TouchableOpacity
+        style={[styles.driverItem, isSelected && styles.driverItemSelected]}
+        onPress={() => setSelectedDriver(item)}
+      >
+        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+          {item.profileImage || item.photoURL ? (
+            <Image
+              source={{ uri: item.profileImage || item.photoURL }}
+              style={{ width: 50, height: 50, borderRadius: 25, marginRight: 12 }}
+            />
+          ) : (
+            <Ionicons
+              name="person-circle-outline"
+              size={50}
+              color="#ccc"
+              style={{ marginRight: 12 }}
+            />
+          )}
+          
+          <View style={{ flex: 1 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Text style={[styles.driverName, isSelected && { color: '#fff' }]}>
+                {item.name}
+              </Text>
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Ionicons name="star" size={14} color="#FFD700" />
+                <Text style={[styles.driverRating, isSelected && { color: '#fff' }]}>
+                  {item.rating}
+                </Text>
+              </View>
+            </View>
+            
+            <Text style={[styles.vehicleMain, isSelected && { color: '#fff' }]}>
+              {vehicleDetails.year} {vehicleDetails.make} {vehicleDetails.model}
             </Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-              <Ionicons name="star" size={14} color="#FFD700" />
-              <Text style={[styles.driverRating, isSelected && { color: '#fff' }]}>
-                {item.rating}
+            
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
+              <Text style={[styles.vehicleDetails, isSelected && { color: '#fff' }]}>
+                {vehicleDetails.color} • {vehicleDetails.licensePlate}
+              </Text>
+            </View>
+            
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
+              <Ionicons 
+                name={
+                  vehicleDetails.vehicleType === 'sedan' ? 'car-sport' :
+                  vehicleDetails.vehicleType === 'suv' ? 'car' :
+                  vehicleDetails.vehicleType === 'van' ? 'bus' :
+                  'car-outline'
+                } 
+                size={12} 
+                color={isSelected ? '#fff' : '#666'} 
+              />
+              <Text style={[styles.vehicleType, isSelected && { color: '#fff' }]}>
+                {vehicleDetails.vehicleType?.toUpperCase() || 'CAR'}
+                {vehicleDetails.capacity ? ` • ${vehicleDetails.capacity} seats` : ''}
               </Text>
             </View>
           </View>
-          
-          {/* Vehicle Make, Model, Year */}
-          <Text style={[styles.vehicleMain, isSelected && { color: '#fff' }]}>
-            {vehicleDetails.year} {vehicleDetails.make} {vehicleDetails.model}
-          </Text>
-          
-          {/* Vehicle Color and License Plate */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
-            <Text style={[styles.vehicleDetails, isSelected && { color: '#fff' }]}>
-              {vehicleDetails.color} • {vehicleDetails.licensePlate}
-            </Text>
-          </View>
-          
-          {/* Vehicle Type and Capacity (if available) */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 2 }}>
-            <Ionicons 
-              name={
-                vehicleDetails.vehicleType === 'sedan' ? 'car-sport' :
-                vehicleDetails.vehicleType === 'suv' ? 'car' :
-                vehicleDetails.vehicleType === 'van' ? 'bus' :
-                'car-outline'
-              } 
-              size={12} 
-              color={isSelected ? '#fff' : '#666'} 
-            />
-            <Text style={[styles.vehicleType, isSelected && { color: '#fff' }]}>
-              {vehicleDetails.vehicleType?.toUpperCase() || 'CAR'}
-              {vehicleDetails.capacity ? ` • ${vehicleDetails.capacity} seats` : ''}
-            </Text>
-          </View>
         </View>
-      </View>
-    </TouchableOpacity>
-  );
-};
+      </TouchableOpacity>
+    );
+  };
 
   return (
     <View style={styles.mainContainer}>
@@ -671,17 +689,41 @@ const renderDriverItem = ({ item }) => {
             />
           )}
           
+          {/* Driver tracking markers */}
+          {rideStatus === 'in-progress' && driverLocationUpdates && (
+            <>
+              <Marker coordinate={driverLocationUpdates}>
+                <View style={styles.driverMarker}>
+                  {selectedDriver?.profileImage ? (
+                    <Image 
+                      source={{ uri: selectedDriver.profileImage }} 
+                      style={styles.driverMarkerImage}
+                    />
+                  ) : (
+                    <Ionicons name="car-sport" size={24} color="#fff" />
+                  )}
+                  <View style={styles.driverMarkerArrow} />
+                </View>
+              </Marker>
+              
+              <Polyline
+                coordinates={[driverLocationUpdates, pickup]}
+                strokeColor="#4285F4"
+                strokeWidth={4}
+              />
+            </>
+          )}
+          
           {drivers.map((driver) => {
             const vehicleDetails = driver.vehicleDetails || {};
   
-  return (
+            return (
               <Marker
                 key={driver.id}
                 coordinate={{ latitude: driver.latitude, longitude: driver.longitude }}
                 title={driver.name}
                 description={`${driver.vehicle} • ${vehicleDetails.color} • ⭐ ${driver.rating}`}
               >
-                {/* Custom marker icon based on vehicle type */}
                 <View style={{
                   backgroundColor: '#FFA500',
                   padding: 8,
@@ -706,6 +748,24 @@ const renderDriverItem = ({ item }) => {
         </MapView>
       )}
 
+      {/* Driver tracking info panel */}
+      {rideStatus === 'in-progress' && (
+        <View style={styles.trackingContainer}>
+          <Text style={styles.trackingText}>Driver is on the way</Text>
+          <View style={styles.trackingInfo}>
+            <Text style={styles.trackingEta}>
+              ETA: {trackingEta || '--'} min
+            </Text>
+            <TouchableOpacity 
+              style={styles.trackingButton}
+              onPress={() => navigation.navigate('RideTracking', { rideId: currentRideId })}
+            >
+              <Text style={styles.trackingButtonText}>Live Tracking</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 80}
@@ -715,153 +775,141 @@ const renderDriverItem = ({ item }) => {
         ]}
       >
         <View style={styles.sheetContainer}>
-          <ScrollView
+          <FlatList
+            data={showFromSuggestions ? fromSuggestions : showToSuggestions ? toSuggestions : []}
             keyboardShouldPersistTaps="handled"
             showsVerticalScrollIndicator={false}
+            ListHeaderComponent={
+              <>
+                {distance && travelTime && price && (
+                  <View style={styles.infoRow}>
+                    <View style={styles.infoBox}>
+                      <Ionicons name="navigate-outline" size={18} color="#FFA500" />
+                      <Text style={styles.infoText}>{distance} km</Text>
+                    </View>
+                    <View style={styles.infoBox}>
+                      <Ionicons name="time-outline" size={18} color="#FFA500" />
+                      <Text style={styles.infoText}>{travelTime} min ETA</Text>
+                    </View>
+                    <View style={styles.infoBox}>
+                      <Ionicons name="cash-outline" size={18} color="#FFA500" />
+                      <Text style={styles.infoText}>${price}</Text>
+                    </View>
+                  </View>
+                )}
+
+                <View style={styles.inputContainer}>
+                  <View style={styles.locationRow}>
+                    <TextInput
+                      ref={pickupInputRef}
+                      value={fromLocation}
+                      onChangeText={(text) => onLocationChange(text, true)}
+                      placeholder="Pickup Location"
+                      style={styles.input}
+                    />
+                    <TouchableOpacity
+                      onPress={() => pickupInputRef.current?.focus()}
+                      style={styles.editIcon}
+                    >
+                      <Ionicons
+                        name="create-outline"
+                        size={20}
+                        color={darkMode ? '#FFA500' : '#444'}
+                      />
+                    </TouchableOpacity>
+                  </View>
+
+                  <View style={styles.locationRow}>
+                    <TextInput
+                      ref={dropoffInputRef}
+                      value={toLocation}
+                      onChangeText={(text) => onLocationChange(text, false)}
+                      placeholder="Dropoff Location"
+                      style={styles.input}
+                    />
+                    <TouchableOpacity
+                      onPress={() => dropoffInputRef.current?.focus()}
+                      style={styles.editIcon}
+                    >
+                      <Ionicons
+                        name="create-outline"
+                        size={20}
+                        color={darkMode ? '#FFA500' : '#444'}
+                      />
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              </>
+            }
+            renderItem={({ item }) => renderSuggestion(item, showFromSuggestions)}
+            ListFooterComponent={
+              <>
+                <View style={styles.transportRow}>
+                  {['taxi', 'bus', 'van'].map((type) => (
+                    <TouchableOpacity
+                      key={type}
+                      style={[
+                        styles.transportOption,
+                        selectedTransport === type && styles.transportSelected,
+                      ]}
+                      onPress={() => setSelectedTransport(type)}
+                    >
+                      <Ionicons
+                        name={
+                          type === 'taxi'
+                            ? 'car-sport'
+                            : type === 'bus'
+                            ? 'bus'
+                            : 'car-outline'
+                        }
+                        size={20}
+                        color="#fff"
+                      />
+                      <Text style={styles.transportText}>{type.toUpperCase()}</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                {loading && (
+                  <ActivityIndicator color="#FFA500" style={{ marginVertical: 10 }} />
+                )}
+
+                <TouchableOpacity
+                  style={styles.paymentButton}
+                  onPress={() => setPaymentModalVisible(true)}
+                >
+                  <MaterialIcons name="payment" size={24} color="#FFA500" />
+                  <Text style={styles.paymentButtonText}>Payment</Text>
+                  <Ionicons name="chevron-forward" size={24} color="#FFA500" />
+                </TouchableOpacity>
+
+                {paymentDone && (
+                  <TouchableOpacity
+                    style={[styles.paymentButton, { marginTop: 10, backgroundColor: '#FFA500' }]}
+                    onPress={onConfirmOrder}
+                    disabled={fetchingDrivers}
+                  >
+                    {fetchingDrivers ? (
+                      <ActivityIndicator color="#fff" />
+                    ) : (
+                      <>
+                        <MaterialIcons name="check-circle" size={24} color="#fff" />
+                        <Text style={[styles.paymentButtonText, { color: '#fff' }]}>
+                          Confirm Order
+                        </Text>
+                        <Ionicons name="chevron-forward" size={24} color="#fff" />
+                      </>
+                    )}
+                  </TouchableOpacity>
+                )}
+              </>
+            }
             contentContainerStyle={{ paddingBottom: 30 }}
-          >
-            {distance && travelTime && price && (
-              <View style={styles.infoRow}>
-                <View style={styles.infoBox}>
-                  <Ionicons name="navigate-outline" size={18} color="#FFA500" />
-                  <Text style={styles.infoText}>{distance} km</Text>
-                </View>
-                <View style={styles.infoBox}>
-                  <Ionicons name="time-outline" size={18} color="#FFA500" />
-                  <Text style={styles.infoText}>{travelTime} min ETA</Text>
-                </View>
-                <View style={styles.infoBox}>
-                  <Ionicons name="cash-outline" size={18} color="#FFA500" />
-                  <Text style={styles.infoText}>${price}</Text>
-                </View>
-              </View>
-            )}
-
-
-            <View style={styles.inputContainer}>
-              <View style={styles.locationRow}>
-                <TextInput
-                  ref={pickupInputRef}
-                  value={fromLocation}
-                  onChangeText={(text) => onLocationChange(text, true)}
-                  placeholder="Pickup Location"
-                  style={styles.input}
-                />
-                <TouchableOpacity
-                  onPress={() => pickupInputRef.current?.focus()}
-                  style={styles.editIcon}
-                >
-                  <Ionicons
-                    name="create-outline"
-                    size={20}
-                    color={darkMode ? '#FFA500' : '#444'}
-                  />
-                </TouchableOpacity>
-              </View>
-
-              {showFromSuggestions && (
-                <FlatList
-                  data={fromSuggestions}
-                  keyExtractor={(item) => item.address}
-                  renderItem={({ item }) => renderSuggestion(item, true)}
-                  style={{ maxHeight: 150, marginBottom: 10 }}
-                  keyboardShouldPersistTaps="handled"
-                />
-              )}
-
-              <View style={styles.locationRow}>
-                <TextInput
-                  ref={dropoffInputRef}
-                  value={toLocation}
-                  onChangeText={(text) => onLocationChange(text, false)}
-                  placeholder="Dropoff Location"
-                  style={styles.input}
-                />
-                <TouchableOpacity
-                  onPress={() => dropoffInputRef.current?.focus()}
-                  style={styles.editIcon}
-                >
-                  <Ionicons
-                    name="create-outline"
-                    size={20}
-                    color={darkMode ? '#FFA500' : '#444'}
-                  />
-                </TouchableOpacity>
-              </View>
-
-              {showToSuggestions && (
-                <FlatList
-                  data={toSuggestions}
-                  keyExtractor={(item) => item.address}
-                  renderItem={({ item }) => renderSuggestion(item, false)}
-                  style={{ maxHeight: 150, marginBottom: 10 }}
-                  keyboardShouldPersistTaps="handled"
-                />
-              )}
-            </View>
-
-            <View style={styles.transportRow}>
-              {['taxi', 'bus', 'van'].map((type) => (
-                <TouchableOpacity
-                  key={type}
-                  style={[
-                    styles.transportOption,
-                    selectedTransport === type && styles.transportSelected,
-                  ]}
-                  onPress={() => setSelectedTransport(type)}
-                >
-                  <Ionicons
-                    name={
-                      type === 'taxi'
-                        ? 'car-sport'
-                        : type === 'bus'
-                        ? 'bus'
-                        : 'car-outline'
-                    }
-                    size={20}
-                    color="#fff"
-                  />
-                  <Text style={styles.transportText}>{type.toUpperCase()}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            {loading && (
-              <ActivityIndicator color="#FFA500" style={{ marginVertical: 10 }} />
-            )}
-
-            <TouchableOpacity
-              style={styles.paymentButton}
-              onPress={() => setPaymentModalVisible(true)}
-            >
-              <MaterialIcons name="payment" size={24} color="#FFA500" />
-              <Text style={styles.paymentButtonText}>Payment</Text>
-              <Ionicons name="chevron-forward" size={24} color="#FFA500" />
-            </TouchableOpacity>
-
-            {paymentDone && (
-  <TouchableOpacity
-    style={[styles.paymentButton, { marginTop: 10, backgroundColor: '#FFA500' }]}
-    onPress={onConfirmOrder}
-    disabled={fetchingDrivers}
-  >
-    {fetchingDrivers ? (
-      <ActivityIndicator color="#fff" />
-    ) : (
-      <>
-        <MaterialIcons name="check-circle" size={24} color="#fff" />
-        <Text style={[styles.paymentButtonText, { color: '#fff' }]}>
-          Confirm Order
-        </Text>
-        <Ionicons name="chevron-forward" size={24} color="#fff" />
-      </>
-    )}
-  </TouchableOpacity>
-)}
-          </ScrollView>
+          />
         </View>
       </KeyboardAvoidingView>
 
+      {/* Payment Method Modal */}
       <Modal
         visible={paymentModalVisible}
         animationType="slide"
@@ -880,48 +928,35 @@ const renderDriverItem = ({ item }) => {
                   paymentMethod === method && styles.paymentMethodSelected,
                   { marginVertical: 8 },
                 ]}
-                onPress={async () => {
-                  try {
-                    setPaymentMethod(method);
-                    setPaymentMethod(method);
-                    setPaymentDone(true); // 👈 Add this
-                    setPaymentModalVisible(false); 
+                onPress={() => {
+                  setPaymentMethod(method);
+                  setPaymentDone(true);
+                  setPaymentModalVisible(false);
 
-                    const rideId = await saveRideToFirestore();
-                    if (!rideId) return;
+                  if (method === 'card') {
+                    navigation.navigate('Main', {
+                      screen: 'Payments',
+                      params: {
+                        pickup,
+                        dropoff,
+                        price,
+                        distance,
+                        selectedTransport,
+                        paymentMethod: method,
+                      },
+                    });
 
-                    if (method === 'card') {
-                      navigation.navigate('Main', {
-                        screen: 'Payments',
-                        params: {
-                          pickup,
-                          dropoff,
-                          rideId,
-                          price,
-                          distance,
-                          selectedTransport,
-                          paymentMethod: method,
-                        },
-                      });
-
-                      if (selectedTransport === 'bus' || selectedTransport === 'van') {
-                        setTimeout(() => {
-                          generateAndShareTicket();
-                        }, 1500);
-                      }
-                    } else {
-                      Alert.alert(
-                        'Cash Payment Selected',
-                        'Please pay the driver in person.'
-                      );
-
-                      if (selectedTransport === 'bus' || selectedTransport === 'van') {
+                    if (selectedTransport === 'bus' || selectedTransport === 'van') {
+                      setTimeout(() => {
                         generateAndShareTicket();
-                      }
+                      }, 1500);
                     }
-                  } catch (error) {
-                    console.error('Payment handling error:', error);
-                    Alert.alert('Error', 'Something went wrong during payment handling.');
+                  } else {
+                    Alert.alert('Cash Payment Selected', 'Please pay the driver in person.');
+
+                    if (selectedTransport === 'bus' || selectedTransport === 'van') {
+                      generateAndShareTicket();
+                    }
                   }
                 }}
               >
@@ -943,15 +978,16 @@ const renderDriverItem = ({ item }) => {
             ))}
 
             <TouchableOpacity
-              onPress={() => setPaymentModalVisible(false)}
-              style={[styles.modalButton, { backgroundColor: '#ccc', marginTop: 16 }]}
-            >
-              <Text>Cancel</Text>
-            </TouchableOpacity>
+  onPress={() => setDriversVisible(false)}
+  style={[styles.modalButton, { backgroundColor: '#ccc' }]}
+>
+  <Text style={{ color: '#000' }}>Cancel</Text>
+</TouchableOpacity>
           </View>
         </View>
       </Modal>
 
+      {/* Driver Selection Modal */}
       <Modal
         visible={driversVisible}
         animationType="slide"
@@ -962,46 +998,57 @@ const renderDriverItem = ({ item }) => {
           <View style={[styles.modalContainer, darkMode && { backgroundColor: '#222' }]}>
             <Text style={[styles.modalTitle, { color: darkMode ? '#FFA500' : '#000' }]}>Select a Driver</Text>
 
-            <FlatList data={drivers} keyExtractor={(item) => item.id} renderItem={renderDriverItem} style={{ maxHeight: 300 }} />
+            <FlatList
+              data={drivers}
+              keyExtractor={(item) => item.id}
+              renderItem={renderDriverItem}
+              contentContainerStyle={{ paddingVertical: 10 }}
+              keyboardShouldPersistTaps="handled"
+            />
 
-            <View style={styles.modalButtonsRow}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginTop: 20 }}>
               <TouchableOpacity
+                onPress={() => setDriversVisible(false)}
                 style={[styles.modalButton, { backgroundColor: '#ccc' }]}
-                onPress={() => {
-                  setSelectedDriver(null);
-                  setDriversVisible(false);
-                }}
               >
-                <Text>Cancel</Text>
+                <Text style={{ color: '#000' }}>Cancel</Text>
               </TouchableOpacity>
 
               <TouchableOpacity
-                style={[styles.modalButton, { backgroundColor: '#FFA500' }]}
-                disabled={!selectedDriver}
-                onPress={() => {
-                 Alert.alert('Driver Selected', `You selected ${selectedDriver?.firstname}.`);
-                  setDriversVisible(false);
-
-                  setDriverLocation({
-                    latitude: selectedDriver.latitude,
-                    longitude: selectedDriver.longitude,
-                    name: selectedDriver.name,
-                  });
-
-                  if (pickup) {
-                    const centerLat = (pickup.latitude + selectedDriver.latitude) / 2;
-                    const centerLng = (pickup.longitude + selectedDriver.longitude) / 2;
-                    const deltaLat = Math.abs(pickup.latitude - selectedDriver.latitude) * 1.5 || 0.05;
-                    const deltaLng = Math.abs(pickup.longitude - selectedDriver.longitude) * 1.5 || 0.05;
-                    setRegion({
-                      latitude: centerLat,
-                      longitude: centerLng,
-                      latitudeDelta: deltaLat,
-                      longitudeDelta: deltaLng,
-                    });
+                onPress={async () => {
+                  if (!selectedDriver) {
+                    Alert.alert('Select Driver', 'Please choose a driver to continue.');
+                    return;
                   }
-                  setCollapsed(true);
+
+                  try {
+                    const rideId = await saveRideToFirestore();
+                    if (!rideId) return;
+
+                    const bookingSuccess = await bookRide(rideId, selectedDriver.id, pickup, dropoff);
+                    
+                    if (bookingSuccess) {
+                      setCurrentRideId(rideId);
+                      setDriversVisible(false);
+                      Alert.alert(
+                        'Ride Booked!',
+                        `Your ride with ${selectedDriver.name} has been booked successfully.`,
+                        [
+                          {
+                            text: 'OK',
+                            onPress: () => {
+                              // Stay on this screen to track the driver
+                            },
+                          },
+                        ]
+                      );
+                    }
+                  } catch (err) {
+                    console.error('Error booking ride:', err);
+                    Alert.alert('Booking Failed', 'An error occurred while booking the ride.');
+                  }
                 }}
+                style={[styles.modalButton, { backgroundColor: '#FFA500' }]}
               >
                 <Text style={{ color: '#fff' }}>Confirm</Text>
               </TouchableOpacity>
@@ -1022,28 +1069,26 @@ const createStyles = (darkMode) =>
     mainContainer: {
       flex: 1,
       backgroundColor: darkMode ? '#1a1a1a' : '#fff',
-      
     },
-   bottomSheet: {
-  position: 'absolute',
-  bottom: 0,
-  width: '100%',
-  maxHeight: '50%', // bottom sheet covers half the screen height
-  backgroundColor: darkMode ? '#2a2a2a' : '#fff',
-  borderTopLeftRadius: 20,
-  borderTopRightRadius: 20,
-  shadowColor: '#000',
-  shadowOffset: { width: 0, height: -2 },
-  shadowOpacity: 0.3,
-  shadowRadius: 4,
-  elevation: 10,
-  zIndex: 100,
-},
-sheetContainer: {
-  flex: 1,
-  padding: 20,
-},
-
+    bottomSheet: {
+      position: 'absolute',
+      bottom: 0,
+      width: '100%',
+      maxHeight: '50%',
+      backgroundColor: darkMode ? '#2a2a2a' : '#fff',
+      borderTopLeftRadius: 20,
+      borderTopRightRadius: 20,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: -2 },
+      shadowOpacity: 0.3,
+      shadowRadius: 4,
+      elevation: 10,
+      zIndex: 100,
+    },
+    sheetContainer: {
+      flex: 1,
+      padding: 20,
+    },
     inputContainer: {
       marginBottom: 10,
     },
@@ -1054,13 +1099,6 @@ sheetContainer: {
     editIcon: {
       marginLeft: 8,
       padding: 6,
-    },
-    distanceText: {
-      color: '#FFA500',
-      fontSize: 18,
-      fontWeight: '600',
-      marginBottom: 8,
-      textAlign: 'center',
     },
     input: {
       flex: 1,
@@ -1098,11 +1136,6 @@ sheetContainer: {
       fontSize: 12,
       marginTop: 5,
     },
-    detailText: {
-      color: '#FFA500',
-      fontSize: 16,
-      marginBottom: 5,
-    },
     paymentButton: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -1120,35 +1153,24 @@ sheetContainer: {
       fontWeight: '700',
       color: '#FFA500',
     },  
-
-    paymentMethodRow: {
-  flexDirection: 'row',
-  justifyContent: 'space-around',
-  marginTop: 10,
-},
-
-paymentMethodOption: {
-  flexDirection: 'row',
-  alignItems: 'center',
-  backgroundColor: '#FFF5E1',
-  paddingVertical: 10,
-  paddingHorizontal: 20,
-  borderRadius: 10,
-  borderWidth: 1,
-  borderColor: '#FFA500',
-},
-
-paymentMethodSelected: {
-  backgroundColor: '#FFA500',
-},
-
-paymentMethodText: {
-  marginLeft: 8,
-  fontWeight: '600',
-  color: '#FFA500',
-},
-
-    // Modal styles
+    paymentMethodOption: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: '#FFF5E1',
+      paddingVertical: 10,
+      paddingHorizontal: 20,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: '#FFA500',
+    },
+    paymentMethodSelected: {
+      backgroundColor: '#FFA500',
+    },
+    paymentMethodText: {
+      marginLeft: 8,
+      fontWeight: '600',
+      color: '#FFA500',
+    },
     modalOverlay: {
       flex: 1,
       backgroundColor: 'rgba(0,0,0,0.5)',
@@ -1172,65 +1194,52 @@ paymentMethodText: {
       marginBottom: 15,
       textAlign: 'center',
     },
-   driverItem: {
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: darkMode ? '#444' : '#ddd',
-    borderRadius: 12,
-    marginVertical: 6,
-    backgroundColor: darkMode ? '#333' : '#f9f9f9',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
-    shadowRadius: 2,
-    elevation: 2,
-  },
-  
-  driverItemSelected: {
-    backgroundColor: '#FFA500',
-    borderColor: '#FF8C00',
-  },
-
-  driverName: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: darkMode ? '#fff' : '#000',
-  },
-
-  driverRating: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: darkMode ? '#fff' : '#666',
-    marginLeft: 4,
-  },
-
-  vehicleMain: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: darkMode ? '#FFA500' : '#333',
-    marginTop: 2,
-  },
-
-  vehicleDetails: {
-    fontSize: 14,
-    color: darkMode ? '#ccc' : '#666',
-    fontWeight: '500',
-  },
-
-  vehicleType: {
-    fontSize: 12,
-    color: darkMode ? '#ccc' : '#666',
-    marginLeft: 4,
-    fontWeight: '500',
-    textTransform: 'uppercase',
-  },
-
-  // Update existing driverDetails style (keep for backward compatibility)
-  driverDetails: {
-    fontSize: 14,
-    color: '#555',
-    marginTop: 4,
-  },
+    driverItem: {
+      padding: 16,
+      borderBottomWidth: 1,
+      borderBottomColor: darkMode ? '#444' : '#ddd',
+      borderRadius: 12,
+      marginVertical: 6,
+      backgroundColor: darkMode ? '#333' : '#f9f9f9',
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 1 },
+      shadowOpacity: 0.1,
+      shadowRadius: 2,
+      elevation: 2,
+    },
+    driverItemSelected: {
+      backgroundColor: '#FFA500',
+      borderColor: '#FF8C00',
+    },
+    driverName: {
+      fontSize: 18,
+      fontWeight: '700',
+      color: darkMode ? '#fff' : '#000',
+    },
+    driverRating: {
+      fontSize: 14,
+      fontWeight: '600',
+      color: darkMode ? '#fff' : '#666',
+      marginLeft: 4,
+    },
+    vehicleMain: {
+      fontSize: 16,
+      fontWeight: '600',
+      color: darkMode ? '#FFA500' : '#333',
+      marginTop: 2,
+    },
+    vehicleDetails: {
+      fontSize: 14,
+      color: darkMode ? '#ccc' : '#666',
+      fontWeight: '500',
+    },
+    vehicleType: {
+      fontSize: 12,
+      color: darkMode ? '#ccc' : '#666',
+      marginLeft: 4,
+      fontWeight: '500',
+      textTransform: 'uppercase',
+    },
     modalButtonsRow: {
       flexDirection: 'row',
       justifyContent: 'space-between',
@@ -1245,47 +1254,106 @@ paymentMethodText: {
       justifyContent: 'center',
     },
     topHeader: {
-  flexDirection: 'row',
-  justifyContent: 'space-between',
-  alignItems: 'center',
-  paddingHorizontal: 20,
-  paddingTop: Platform.OS === 'ios' ? 50 : 20,
-  paddingBottom: 10,
-  backgroundColor: darkMode ? '#1a1a1a' : '#fff',
-  zIndex: 10,
-},
-
-settingsButton: {
-  padding: 8,
-},
-infoRow: {
-  flexDirection: 'row',
-  justifyContent: 'center',
-  marginBottom: 12,
-},
-
-infoBox: {
-  flexDirection: 'row',
-  alignItems: 'center',
-  backgroundColor: darkMode ? '#333' : '#FFF5E1',
-  paddingVertical: 6,
-  paddingHorizontal: 14,
-  borderRadius: 20,
-  borderWidth: 1,
-  borderColor: '#FFA500',
-  shadowColor: '#FFA500',
-  shadowOpacity: 0.3,
-  shadowRadius: 5,
-  shadowOffset: { width: 0, height: 2 },
-  elevation: 3,
-},
-
-infoText: {
-  marginLeft: 8,
-  color: darkMode ? '#FFA500' : '#B36B00',
-  fontWeight: '600',
-  fontSize: 16,
-},
-
-
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      paddingHorizontal: 20,
+      paddingTop: Platform.OS === 'ios' ? 50 : 20,
+      paddingBottom: 10,
+      backgroundColor: darkMode ? '#1a1a1a' : '#fff',
+      zIndex: 10,
+    },
+    settingsButton: {
+      padding: 8,
+    },
+    infoRow: {
+      flexDirection: 'row',
+      justifyContent: 'center',
+      marginBottom: 12,
+    },
+    infoBox: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      backgroundColor: darkMode ? '#333' : '#FFF5E1',
+      paddingVertical: 6,
+      paddingHorizontal: 14,
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: '#FFA500',
+      shadowColor: '#FFA500',
+      shadowOpacity: 0.3,
+      shadowRadius: 5,
+      shadowOffset: { width: 0, height: 2 },
+      elevation: 3,
+    },
+    infoText: {
+      marginLeft: 8,
+      color: darkMode ? '#FFA500' : '#B36B00',
+      fontWeight: '600',
+      fontSize: 16,
+    },
+    // Tracking styles
+    trackingContainer: {
+      position: 'absolute',
+      top: 80,
+      left: 20,
+      right: 20,
+      backgroundColor: darkMode ? 'rgba(0,0,0,0.8)' : 'rgba(255,255,255,0.9)',
+      borderRadius: 12,
+      padding: 15,
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.3,
+      shadowRadius: 4,
+      elevation: 5,
+    },
+    trackingText: {
+      fontSize: 18,
+      fontWeight: '600',
+      color: darkMode ? '#FFA500' : '#000',
+      marginBottom: 8,
+    },
+    trackingInfo: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+    },
+    trackingEta: {
+      fontSize: 16,
+      color: darkMode ? '#fff' : '#333',
+    },
+    trackingButton: {
+      backgroundColor: '#FFA500',
+      paddingVertical: 8,
+      paddingHorizontal: 16,
+      borderRadius: 20,
+    },
+    trackingButtonText: {
+      color: '#fff',
+      fontWeight: '600',
+    },
+    driverMarker: {
+      alignItems: 'center',
+    },
+    driverMarkerImage: {
+      width: 40,
+      height: 40,
+      borderRadius: 20,
+      borderWidth: 2,
+      borderColor: '#fff',
+    },
+    driverMarkerArrow: {
+      width: 0,
+      height: 0,
+      backgroundColor: 'transparent',
+      borderStyle: 'solid',
+      borderLeftWidth: 5,
+      borderRightWidth: 5,
+      borderBottomWidth: 10,
+      borderLeftColor: 'transparent',
+      borderRightColor: 'transparent',
+      borderBottomColor: '#FFA500',
+      transform: [{ rotate: '180deg' }],
+      marginTop: -5,
+    },
   });

@@ -1,46 +1,41 @@
-// App.js
 import React, { useEffect, useState } from 'react';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import Toast from 'react-native-toast-message';
 import * as Notifications from 'expo-notifications';
-import * as Device from 'expo-device';
-import { Platform } from 'react-native';
+import { Platform, Alert, View, Text, TouchableOpacity } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { ThemeProvider } from './ThemeContext';
+import { doc, getDoc, onSnapshot } from 'firebase/firestore';
+import { auth, db } from './firebaseConfig';
 
-// Import GestureHandlerRootView
-import { GestureHandlerRootView } from 'react-native-gesture-handler'; //
+// Screens (keep your existing screen imports)
+import SignUp from './SignUp';
+import SignIn from './SignIn';
+import ResetPassword from './ResetPassword';
+import VerifyOtpScreen from './VerifyOtpScreen';
+import Home from './Home';
+import ProfileScreen from './ProfileScreen';
+import PaymentsScreen from './PaymentsScreen';
+import NotificationsScreen from './NotificationsScreen';
+import RidesScreen from './RidesScreen';
+import ChangePasswordScreen from './ChangePasswordScreen';
+import DriverHome from './DriverHome';
+import DriverProfile from './DriverProfile';
+import DriverTrips from './DriverTrips';
+import DriverRegistration from './DriverRegistration';
+import DriverSettings from './DriverSettings';
+import EarningsDetail from './EarningsDetail';
+import DriverHistory from './DriverHistory';
+import AdminDashboard from './AdminDashboard';
+import ChatScreen from './ChatScreen';
 
-import { ThemeProvider } from './ThemeContext'; //
-import { onAuthStateChanged } from 'firebase/auth'; //
-import { doc, getDoc, onSnapshot, updateDoc } from 'firebase/firestore'; //
-import { auth, db } from './firebaseConfig'; //
+const Stack = createNativeStackNavigator();
+const Tab = createBottomTabNavigator();
 
-// Screens
-import SignUp from './SignUp'; //
-import SignIn from './SignIn'; //
-import ResetPassword from './ResetPassword'; //
-import VerifyOtpScreen from './VerifyOtpScreen'; //
-import Home from './Home'; //
-import ProfileScreen from './ProfileScreen'; //
-import PaymentsScreen from './PaymentsScreen'; //
-import NotificationsScreen from './NotificationsScreen'; //
-import RidesScreen from './RidesScreen'; //
-import ChangePasswordScreen from './ChangePasswordScreen'; //
-import DriverHome from './DriverHome'; //
-import DriverProfile from './DriverProfile'; //
-import DriverTrips from './DriverTrips'; //
-import DriverRegistration from './DriverRegistration'; //
-import DriverSettings from './DriverSettings'; //
-import DriverHistory from './DriverHistory'; //
-import AdminDashboard from './AdminDashboard'; //
-import ChatScreen from './ChatScreen'; //
-
-const Stack = createNativeStackNavigator(); //
-const Tab = createBottomTabNavigator(); //
-
-function MainTabs() { //
+function MainTabs() {
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
@@ -65,7 +60,7 @@ function MainTabs() { //
   );
 }
 
-function DriverTabs() { //
+function DriverTabs() {
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
@@ -90,164 +85,206 @@ function DriverTabs() { //
   );
 }
 
-export default function App() { //
-  const [initialScreen, setInitialScreen] = useState('SignIn'); //
+export default function App() {
+  const [initialScreen, setInitialScreen] = useState('SignIn');
+  const [notificationCount, setNotificationCount] = useState(0);
+  const [lastNotification, setLastNotification] = useState(null);
 
-  useEffect(() => { //
-    const registerForPushNotificationsAsync = async () => {
-      if (!Device.isDevice) return alert('Use a physical device for push notifications.');
-      const { status: existingStatus } = await Notifications.getPermissionsAsync();
-      let finalStatus = existingStatus;
-      if (existingStatus !== 'granted') {
-        const { status } = await Notifications.requestPermissionsAsync();
-        finalStatus = status;
-      }
-      if (finalStatus !== 'granted') return;
-
-      const token = (await Notifications.getExpoPushTokenAsync()).data;
-      console.log('Expo Push Token:', token);
-
-      if (auth.currentUser) {
-        await updateDoc(doc(db, 'users', auth.currentUser.uid), {
-          expoPushToken: token,
+  // Notification setup and handler
+  useEffect(() => {
+    const setupNotifications = async () => {
+      try {
+        // Configure notification presentation
+        await Notifications.setNotificationHandler({
+          handleNotification: async () => ({
+            shouldShowAlert: true,
+            shouldPlaySound: false,
+            shouldSetBadge: false,
+          }),
         });
-      }
 
-      if (Platform.OS === 'android') {
-        Notifications.setNotificationChannelAsync('default', {
-          name: 'default',
-          importance: Notifications.AndroidImportance.MAX,
-          vibrationPattern: [0, 250, 250, 250],
-          lightColor: '#FFA500',
+        // Add listener for notification taps
+        const subscription = Notifications.addNotificationResponseReceivedListener(response => {
+          const data = response.notification.request.content.data;
+          console.log('Notification tapped:', data);
+          setNotificationCount(prev => Math.max(0, prev - 1));
+          setLastNotification(data);
         });
+
+        return () => subscription.remove();
+      } catch (error) {
+        console.error("Notification setup error:", error);
       }
     };
 
-    registerForPushNotificationsAsync();
+    setupNotifications();
   }, []);
 
-  useEffect(() => { //
-  const user = auth.currentUser; //
-  if (!user) return; //
+  // Ride status listener with notifications
+  useEffect(() => {
+    const user = auth.currentUser;
+    if (!user) return;
 
-  const userRef = doc(db, 'users', user.uid); //
-  let unsubscribeRide = null; //
+    const userRef = doc(db, 'users', user.uid);
+    let unsubscribeRide = null;
 
-  const fetchRideListener = async () => { //
-    const userSnap = await getDoc(userRef); //
-    const userData = userSnap.data(); //
-    const rideId = userData?.currentRideId; //
+    const statusMessages = {
+      'accepted': ['Ride Accepted', 'Your driver has accepted the ride'],
+      'en_route': ['Driver Coming', 'Your driver is on the way'],
+      'started': ['Ride Started', 'Your trip has begun'],
+      'completed': ['Ride Complete', 'Thanks for using our service']
+    };
 
-    if (!rideId) return; //
+    const fetchRideListener = async () => {
+      const userData = (await getDoc(userRef)).data();
+      const rideId = userData?.currentRideId;
+      if (!rideId) return;
 
-    const rideRef = doc(db, 'rides', rideId); //
+      const rideRef = doc(db, 'rides', rideId);
+      unsubscribeRide = onSnapshot(rideRef, async (docSnapshot) => {
+        const data = docSnapshot.data();
+        if (!data?.status) return;
 
-    unsubscribeRide = onSnapshot(rideRef, async (docSnapshot) => { //
-      const data = docSnapshot.data(); //
-      if (!data?.status) return; //
+        const [title, body] = statusMessages[data.status] || [];
+        if (!title) return;
 
-      let title = ''; //
-      let body = ''; //
-
-      switch (data.status) { //
-        case 'accepted': //
-          title = 'Ride Accepted'; //
-          body = 'Your ride has been accepted by a driver.'; //
-          break; //
-        case 'en_route': //
-          title = 'Driver En Route'; //
-          body = 'Your driver is on the way to pick you up.'; //
-          break; //
-        case 'started': //
-          title = 'Ride Started'; //
-          body = 'Your ride has started.'; //
-          break; //
-        case 'completed': //
-          title = 'Ride Completed'; //
-          body = 'Thank you for riding with us.'; //
-          break; //
-        default: //
-          return; //
-      }
-
-      // ✅ Show in-app toast
-      Toast.show({ //
-        type: 'info', //
-        text1: title, //
-        text2: body, //
-        position: 'top', //
-      });
-
-      // ✅ Write to Firestore
-      // NOTE: `addDoc` and `collection` are not imported in the provided snippet.
-      // If you intend to use them, ensure they are imported from 'firebase/firestore'.
-      /*
-      await addDoc(collection(db, 'notifications'), {
-        userId: user.uid,
-        title,
-        body,
-        timestamp: serverTimestamp(),
-        read: false,
-      });
-      */
-
-      // ✅ Send Expo Push Notification
-      const token = userData?.expoPushToken; //
-      if (token) { //
-        await fetch('https://exp.host/--/api/v2/push/send', { //
-          method: 'POST', //
-          headers: { //
-            Accept: 'application/json', //
-            'Content-Type': 'application/json', //
-          },
-          body: JSON.stringify({ //
-            to: token, //
-            title, //
-            body, //
-            sound: 'default', //
-          }),
+        // Show toast
+        Toast.show({
+          type: 'info',
+          text1: title,
+          text2: body,
+          position: 'top',
         });
+
+        // Trigger in-app notification
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title,
+            body,
+            data: { 
+              rideId,
+              status: data.status,
+              timestamp: new Date().toISOString() 
+            },
+            _displayInForeground: true,
+          },
+          trigger: null,
+        });
+
+        setNotificationCount(prev => prev + 1);
+      });
+    };
+
+    fetchRideListener();
+    return () => unsubscribeRide?.();
+  }, []);
+
+  // Test Notification Button Component
+  const TestNotificationButton = () => {
+    const [testResult, setTestResult] = useState(null);
+
+    const triggerTest = async () => {
+      try {
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: "Test Notification",
+            body: "This is a successful test notification",
+            data: { test: true, timestamp: Date.now() },
+            _displayInForeground: true,
+          },
+          trigger: null,
+        });
+        setTestResult({ success: true, message: "Test notification sent!" });
+        setNotificationCount(prev => prev + 1);
+      } catch (error) {
+        setTestResult({ success: false, message: error.message });
       }
-    });
+    };
+
+    return (
+      <View style={{ position: 'absolute', bottom: 20, right: 20, zIndex: 100 }}>
+        {testResult && (
+          <View style={{
+            backgroundColor: testResult.success ? '#4CAF50' : '#F44336',
+            padding: 10,
+            borderRadius: 5,
+            marginBottom: 10,
+          }}>
+            <Text style={{ color: 'white' }}>{testResult.message}</Text>
+          </View>
+        )}
+        <TouchableOpacity
+          style={{
+            backgroundColor: '#007bff',
+            padding: 15,
+            borderRadius: 30,
+            flexDirection: 'row',
+            alignItems: 'center',
+          }}
+          onPress={triggerTest}
+        >
+          <MaterialIcons name="notifications" size={24} color="white" />
+          <Text style={{ color: 'white', marginLeft: 10 }}>Test</Text>
+        </TouchableOpacity>
+      </View>
+    );
   };
-
-  fetchRideListener(); //
-
-  return () => { //
-    if (unsubscribeRide) unsubscribeRide(); //
-  };
-}, []);
-
 
   return (
-    // Wrap your entire app with GestureHandlerRootView
     <GestureHandlerRootView style={{ flex: 1 }}>
       <ThemeProvider>
         <NavigationContainer>
           <Stack.Navigator initialRouteName={initialScreen}>
-            {/* Auth */}
+            {/* Auth Screens */}
             <Stack.Screen name="SignIn" component={SignIn} options={{ headerShown: false }} />
             <Stack.Screen name="SignUp" component={SignUp} options={{ headerShown: false }} />
             <Stack.Screen name="ResetPassword" component={ResetPassword} options={{ headerShown: false }} />
             <Stack.Screen name="VerifyOtp" component={VerifyOtpScreen} />
 
-            {/* Driver onboarding */}
+            {/* Driver Onboarding */}
             <Stack.Screen name="DriverRegistration" component={DriverRegistration} options={{ headerShown: false }} />
 
-            {/* Main */}
+            {/* Main App Screens */}
             <Stack.Screen name="Main" component={MainTabs} options={{ headerShown: false }} />
             <Stack.Screen name="DriverMain" component={DriverTabs} options={{ headerShown: false }} />
 
-            {/* Admin */}
+            {/* Admin Screens */}
             <Stack.Screen name="AdminDashboard" component={AdminDashboard} options={{ headerShown: false }} />
 
-            {/* Global */}
-            <Stack.Screen name="NotificationsScreen" component={NotificationsScreen} options={{ title: 'Notifications' }} />
+            {/* Shared Screens */}
+            <Stack.Screen 
+              name="NotificationsScreen" 
+              component={NotificationsScreen} 
+              options={{ 
+                title: 'Notifications',
+                headerRight: () => (
+                  <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                    {notificationCount > 0 && (
+                      <View style={{
+                        backgroundColor: 'red',
+                        borderRadius: 10,
+                        width: 20,
+                        height: 20,
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                        marginRight: 10
+                      }}>
+                        <Text style={{ color: 'white', fontSize: 12 }}>{notificationCount}</Text>
+                      </View>
+                    )}
+                    <MaterialIcons name="notifications" size={24} color="black" />
+                  </View>
+                ),
+              }} 
+            />
             <Stack.Screen name="DriverHistory" component={DriverHistory} options={{ title: 'Trip History' }} />
+            <Stack.Screen name="EarningsDetail" component={EarningsDetail} />
             <Stack.Screen name="ChangePasswordScreen" component={ChangePasswordScreen} options={{ title: 'Change Password' }} />
             <Stack.Screen name="Chat" component={ChatScreen} />
           </Stack.Navigator>
+          
           <Toast />
+          <TestNotificationButton />
         </NavigationContainer>
       </ThemeProvider>
     </GestureHandlerRootView>

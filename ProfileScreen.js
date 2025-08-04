@@ -1,23 +1,28 @@
-import React, { useState, useEffect } from 'react';
-import { 
+import React, { useState, useEffect, useRef } from 'react';
+import {
   View, Text, TextInput, TouchableOpacity, StyleSheet, SafeAreaView,
   ScrollView, ActivityIndicator, Alert, Image, ActionSheetIOS, Platform
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from './ThemeContext';
-import { getAuth } from 'firebase/auth';
+import { auth, db } from './firebaseConfig';
+import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
+import { uploadImageToStorage, STORAGE_FOLDERS } from './storageUtils';
 
-const FIRESTORE_API_KEY = 'AIzaSyAZf-KMgaokOF-PVhxgXG64bxWK28_h9-0';
-const PROJECT_ID = 'local-transport-booking-app';
-const DATABASE_URL = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/databases/(default)/documents`;
-
-// Cloudinary config — REPLACE with your details
-const CLOUDINARY_URL = 'https://api.cloudinary.com/v1_1/dgkethsxx/image/upload';
-const CLOUDINARY_UPLOAD_PRESET = 'profile_images';
-
-const auth = getAuth();
 const getUserDocId = () => auth.currentUser?.uid || null;
+
+// Helper function to validate image URLs
+const isValidImageUrl = (url) => {
+  if (!url) return false;
+  // Check if it's a valid HTTP/HTTPS URL
+  try {
+    const urlObj = new URL(url);
+    return urlObj.protocol === 'http:' || urlObj.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
 
 export default function ProfileScreen() {
   const { darkMode } = useTheme();
@@ -39,66 +44,44 @@ export default function ProfileScreen() {
       zipcode: '',
     },
   });
+  const imageRef = useRef(null);
 
-  // Get the current user's ID token for authentication
-  const getAuthToken = async () => {
-    try {
-      const user = auth.currentUser;
-      if (user) {
-        return await user.getIdToken();
-      }
-      return null;
-    } catch (error) {
-      console.error('Error getting auth token:', error);
-      return null;
-    }
-  };
-
-  // Fetch profile from Firestore REST API with authentication
+  // Fetch profile from Firestore
   const fetchProfile = async () => {
     setLoading(true);
     try {
-      const token = await getAuthToken();
-      if (!token) {
+      if (!userDocId) {
         throw new Error('User not authenticated');
       }
 
-      const headers = {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      };
+      const docRef = doc(db, 'users', userDocId);
+      const docSnap = await getDoc(docRef);
+     
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+       
+        setProfile({
+          firstname: data.firstname || '',
+          lastname: data.lastname || '',
+          phone: data.phone || '',
+          // Only set profileImage if it's a valid URL
+          profileImage: isValidImageUrl(data.profileImage) ? data.profileImage : '',
+          address: {
+            street: data.address?.street || '',
+            city: data.address?.city || '',
+            state: data.address?.state || '',
+            zipcode: data.address?.zipcode || '',
+          },
+        });
 
-      const res = await fetch(`${DATABASE_URL}/users/${userDocId}?key=${FIRESTORE_API_KEY}`, {
-        method: 'GET',
-        headers,
-      });
-      
-      if (!res.ok) {
-        if (res.status === 404) {
-          await createDefaultProfile();
-          return;
+        // If the stored profileImage was invalid, update Firestore to clear it
+        if (data.profileImage && !isValidImageUrl(data.profileImage)) {
+          console.log('Clearing invalid profile image URL from database:', data.profileImage);
+          await updateDoc(docRef, { profileImage: '' });
         }
-        const errorText = await res.text();
-        console.error('Fetch error response:', errorText);
-        throw new Error(`Failed to fetch profile: ${res.status} - ${errorText}`);
+      } else {
+        await createDefaultProfile();
       }
-      
-      const data = await res.json();
-      const fields = data.fields || {};
-      
-      
-      setProfile({
-        firstname: fields.firstname?.stringValue || '',
-        lastname: fields.lastname?.stringValue || '',
-        phone: fields.phone?.stringValue || '',
-        profileImage: fields.profileImage?.stringValue || '',
-        address: {
-          street: fields.address?.mapValue?.fields?.street?.stringValue || '',
-          city: fields.address?.mapValue?.fields?.city?.stringValue || '',
-          state: fields.address?.mapValue?.fields?.state?.stringValue || '',
-          zipcode: fields.address?.mapValue?.fields?.zipcode?.stringValue || '',
-        },
-      });
     } catch (error) {
       console.error('Fetch profile error:', error);
       Alert.alert('Error', `Failed to load profile: ${error.message}`);
@@ -109,49 +92,29 @@ export default function ProfileScreen() {
 
   const createDefaultProfile = async () => {
     try {
-      const token = await getAuthToken();
-      if (!token) {
+      if (!userDocId) {
         throw new Error('User not authenticated');
       }
 
       const defaultProfile = {
-        fields: {
-          firstname: { stringValue: '' },
-          lastname: { stringValue: '' },
-          phone: { stringValue: '' },
-          profileImage: { stringValue: '' },
-          address: {
-            mapValue: {
-              fields: {
-                street: { stringValue: '' },
-                city: { stringValue: '' },
-                state: { stringValue: '' },
-                zipcode: { stringValue: '' },
-              },
-            },
-          },
+        firstname: '',
+        lastname: '',
+        phone: '',
+        profileImage: '',
+        address: {
+          street: '',
+          city: '',
+          state: '',
+          zipcode: '',
         },
+        createdAt: new Date(),
+        email: auth.currentUser?.email || '',
       };
 
-      const headers = {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      };
-
-      const res = await fetch(`${DATABASE_URL}/users/${userDocId}?key=${FIRESTORE_API_KEY}`, {
-        method: 'PUT',
-        headers,
-        body: JSON.stringify(defaultProfile),
-      });
-
-      if (!res.ok) {
-        const errorText = await res.text();
-        console.error('Create profile error response:', errorText);
-        throw new Error(`Failed to create default profile: ${res.status} - ${errorText}`);
-      } else {
-        // After creation, fetch profile again to update UI
-        fetchProfile();
-      }
+      const docRef = doc(db, 'users', userDocId);
+      await setDoc(docRef, defaultProfile);
+     
+      setProfile(defaultProfile);
     } catch (error) {
       console.error('Create default profile error:', error);
       Alert.alert('Error', `Failed to create profile: ${error.message}`);
@@ -169,53 +132,19 @@ export default function ProfileScreen() {
   const saveProfile = async (profileData = profile) => {
     setSaving(true);
     try {
-      const token = await getAuthToken();
-      if (!token) {
+      if (!userDocId) {
         throw new Error('User not authenticated');
       }
 
-      const body = {
-        fields: {
-          firstname: { stringValue: profileData.firstname },
-          lastname: { stringValue: profileData.lastname },
-          phone: { stringValue: profileData.phone },
-          profileImage: { stringValue: profileData.profileImage },
-          address: {
-            mapValue: {
-              fields: {
-                street: { stringValue: profileData.address.street },
-                city: { stringValue: profileData.address.city },
-                state: { stringValue: profileData.address.state },
-                zipcode: { stringValue: profileData.address.zipcode },
-              },
-            },
-          },
-        },
-      };
-
-      const updateMaskFields = [
-        'firstname', 'lastname', 'phone', 'profileImage',
-        'address.street', 'address.city', 'address.state', 'address.zipcode',
-      ];
-
-      const url = `${DATABASE_URL}/users/${userDocId}?key=${FIRESTORE_API_KEY}&updateMask.fieldPaths=${updateMaskFields.join('&updateMask.fieldPaths=')}`;
-
-      const headers = {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      };
-
-      const res = await fetch(url, {
-        method: 'PUT',
-        headers,
-        body: JSON.stringify(body),
+      const docRef = doc(db, 'users', userDocId);
+      await updateDoc(docRef, {
+        firstname: profileData.firstname,
+        lastname: profileData.lastname,
+        phone: profileData.phone,
+        profileImage: profileData.profileImage,
+        address: profileData.address,
+        updatedAt: new Date(),
       });
-
-      if (!res.ok) {
-        const errorText = await res.text();
-        console.error('Save profile error response:', errorText);
-        throw new Error(`Failed to update profile: ${res.status} - ${errorText}`);
-      }
 
       Alert.alert('Success', 'Profile updated successfully!');
     } catch (error) {
@@ -239,37 +168,32 @@ export default function ProfileScreen() {
     }));
   };
 
-  // ===== Image picking & uploading logic =====
-
-  // Upload image helper (used by both camera & gallery pickers)
-  const uploadImage = async (localUri) => {
+  // ===== Image Upload using Storage Utils =====
+  const uploadProfileImage = async (localUri) => {
     setUploadingImage(true);
     try {
-      const response = await fetch(localUri);
-      const blob = await response.blob();
-
-      const formData = new FormData();
-      formData.append('file', {
-        uri: localUri,
-        type: blob.type || 'image/jpeg',
-        name: `upload_${Date.now()}.jpg`,
-      });
-      formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
-
-      const uploadResponse = await fetch(CLOUDINARY_URL, {
-        method: 'POST',
-        body: formData,
-      });
-
-      const uploadResult = await uploadResponse.json();
-
-      if (!uploadResponse.ok) {
-        throw new Error(uploadResult.error?.message || 'Cloudinary upload failed');
+      if (!userDocId) {
+        throw new Error('User not authenticated');
       }
 
-      const updatedProfile = { ...profile, profileImage: uploadResult.secure_url };
+      console.log('Old image URL for deletion:', profile.profileImage);
+
+      const downloadURL = await uploadImageToStorage(
+        localUri,
+        STORAGE_FOLDERS.PROFILE_IMAGES,
+        userDocId,
+        profile.profileImage // This will delete the old image
+      );
+      
+      console.log('New image download URL from storage utility:', downloadURL);
+      
+      const updatedProfile = { ...profile, profileImage: downloadURL };
       setProfile(updatedProfile);
+      
+      console.log('Profile state after setProfile (new image URL):', updatedProfile.profileImage);
+
       await saveProfile(updatedProfile);
+      
       Alert.alert('Success', 'Profile image updated successfully!');
     } catch (error) {
       console.error('Image upload error:', error);
@@ -292,7 +216,7 @@ export default function ProfileScreen() {
       quality: 0.7,
     });
     if (!result.canceled) {
-      uploadImage(result.assets[0].uri);
+      uploadProfileImage(result.assets[0].uri);
     }
   };
 
@@ -309,7 +233,7 @@ export default function ProfileScreen() {
       quality: 0.7,
     });
     if (!result.canceled) {
-      uploadImage(result.assets[0].uri);
+      uploadProfileImage(result.assets[0].uri);
     }
   };
 
@@ -359,8 +283,8 @@ export default function ProfileScreen() {
           <Text style={styles.title}>Profile</Text>
         </View>
 
-        <TouchableOpacity 
-          onPress={chooseImageSource} 
+        <TouchableOpacity
+          onPress={chooseImageSource}
           style={styles.imagePicker}
           disabled={uploadingImage}
         >
@@ -368,11 +292,20 @@ export default function ProfileScreen() {
             <View style={styles.profileImageContainer}>
               <ActivityIndicator size="large" color="#FFA500" />
             </View>
-          ) : profile.profileImage ? (
+          ) : (profile.profileImage && isValidImageUrl(profile.profileImage)) ? (
             <Image
-              key={profile.profileImage}
-              source={{ uri: profile.profileImage, cache: 'reload' }}
+              ref={imageRef}
+              key={profile.profileImage + '?t=' + new Date().getTime()}
+              source={{ uri: profile.profileImage }}
               style={styles.profileImage}
+              onError={(e) => {
+                console.error('Image loading error:', e.nativeEvent.error);
+                // Clear invalid image URL from profile
+                console.log('Clearing invalid image URL from state');
+                setProfile(prev => ({ ...prev, profileImage: '' }));
+              }}
+              onLoad={() => console.log('Image loaded successfully from URI:', profile.profileImage)}
+              onLoadStart={() => console.log('Image load started for URI:', profile.profileImage)}
             />
           ) : (
             <Ionicons name="person-circle-outline" size={120} color={darkMode ? '#888' : '#ccc'} />

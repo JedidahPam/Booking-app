@@ -39,19 +39,43 @@ export default function DriverHistory() {
   const renderItem = ({ item }) => (
     <View style={styles.card}>
       <Text style={styles.label}>Pickup:</Text>
-      <Text style={styles.value}>{item.pickupLocation?.mapValue?.fields?.address?.stringValue || 'N/A'}</Text>
+      <Text style={styles.value}>{item.pickup?.address || 'N/A'}</Text>
 
       <Text style={styles.label}>Drop-off:</Text>
-      <Text style={styles.value}>{item.dropoffLocation?.mapValue?.fields?.address?.stringValue || 'N/A'}</Text>
+      <Text style={styles.value}>{item.dropoff?.address || 'N/A'}</Text>
 
       <Text style={styles.label}>Fare:</Text>
-      <Text style={styles.value}>${item.finalFare?.doubleValue || 'N/A'}</Text>
+      <Text style={styles.value}>${item.price || 'N/A'}</Text>
 
-      <Text style={styles.label}>Distance:</Text>
-      <Text style={styles.value}>{item.distance?.doubleValue || 'N/A'} km</Text>
+      <Text style={styles.label}>Payment Method:</Text>
+      <Text style={styles.value}>{item.paymentMethod || 'N/A'}</Text>
+
+      <Text style={styles.label}>Transport Type:</Text>
+      <Text style={styles.value}>{item.transport || 'N/A'}</Text>
+
+      <Text style={styles.label}>Status:</Text>
+      <Text style={styles.value}>{item.status || 'N/A'}</Text>
 
       <Text style={styles.label}>Completed:</Text>
-      <Text style={styles.value}>{item.endTime?.timestampValue ? new Date(item.endTime.timestampValue).toLocaleString() : 'N/A'}</Text>
+      <Text style={styles.value}>
+        {item.timestamp ? new Date(item.timestamp).toLocaleString() : 'N/A'}
+      </Text>
+
+      <View style={styles.locationDetails}>
+        <Text style={styles.label}>Pickup Coordinates:</Text>
+        <Text style={styles.value}>
+          {item.pickup?.latitude && item.pickup?.longitude 
+            ? `${item.pickup.latitude}, ${item.pickup.longitude}` 
+            : 'N/A'}
+        </Text>
+
+        <Text style={styles.label}>Drop-off Coordinates:</Text>
+        <Text style={styles.value}>
+          {item.dropoff?.latitude && item.dropoff?.longitude 
+            ? `${item.dropoff.latitude}, ${item.dropoff.longitude}` 
+            : 'N/A'}
+        </Text>
+      </View>
     </View>
   );
 
@@ -94,11 +118,19 @@ const styles = StyleSheet.create({
   label: {
     color: '#FFB84D',
     fontSize: 14,
+    fontWeight: '600',
+    marginTop: 4,
   },
   value: {
     color: '#FFA500',
     fontSize: 16,
     marginBottom: 8,
+  },
+  locationDetails: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#444',
   },
   emptyText: {
     color: '#FFB84D',

@@ -1,11 +1,9 @@
 // firebaseConfig.js
 import { initializeApp } from "firebase/app";
-import { initializeAuth, getReactNativePersistence } from "firebase/auth"; // Import initializeAuth and getReactNativePersistence
+import { initializeAuth, getReactNativePersistence, signOut as firebaseSignOut } from 'firebase/auth'; // Added initializeAuth and getReactNativePersistence
+import ReactNativeAsyncStorage from '@react-native-async-storage/async-storage'; // Import AsyncStorage
 import { getFirestore } from "firebase/firestore";
-import { getStorage } from "firebase/storage";
-import AsyncStorage from '@react-native-async-storage/async-storage'; // Import AsyncStorage
 
-// Your Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyAZf-KMgaokOF-PVhxgXG64bxWK28_h9-0",
   authDomain: "local-transport-booking-app.firebaseapp.com",
@@ -15,14 +13,12 @@ const firebaseConfig = {
   appId: "1:603930160592:web:b24160e5dbb69305ad1dd5"
 };
 
-// Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Firebase services
-// Initialize Auth with persistence
+// Initialize Firebase Auth with AsyncStorage persistence
 export const auth = initializeAuth(app, {
-  persistence: getReactNativePersistence(AsyncStorage)
+  persistence: getReactNativePersistence(ReactNativeAsyncStorage)
 });
 
 export const db = getFirestore(app);
-export const storage = getStorage(app);
+export { firebaseSignOut as signOut };

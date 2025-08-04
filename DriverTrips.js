@@ -18,9 +18,10 @@ import { db, auth } from './firebaseConfig';
 import * as Location from 'expo-location';
 import MapView, { Marker, Polyline } from 'react-native-maps';
 import haversine from 'haversine-distance';
+import polyline from '@mapbox/polyline';
 
 const windowWidth = Dimensions.get('window').width;
-const API_KEY = 'AIzaSyAZf-KMgaokOF-PVhxgXG64bxWK28_h9-0';
+const OPENROUTE_API_KEY = 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjllZjJjN2YyMTI1NTQ1YWI5NzJhZmYxMjBmNjhkMTg5IiwiaCI6Im11cm11cjY0In0=';
 const RIDE_DOCUMENT_BASE_URL = `https://firestore.googleapis.com/v1/projects/local-transport-booking-app/databases/(default)/documents/rides`;
 
 export default function DriverTrips({ navigation }) {
@@ -31,8 +32,41 @@ export default function DriverTrips({ navigation }) {
   const [expandedMapDropoff, setExpandedMapDropoff] = useState(null);
   const [driverLocation, setDriverLocation] = useState(null);
   const [availableRidesCount, setAvailableRidesCount] = useState(0);
+  const [routeCoordinates, setRouteCoordinates] = useState([]);
   const locationSubscription = useRef(null);
   const availableRidesUnsubscribeRef = useRef(null);
+  const mapRef = useRef(null);
+
+  // Fetch directions from OpenRouteService API
+  const fetchDirections = async (startLoc, endLoc) => {
+    try {
+      const apiUrl = `https://api.openrouteservice.org/v2/directions/driving-car?api_key=${OPENROUTE_API_KEY}&start=${startLoc.longitude},${startLoc.latitude}&end=${endLoc.longitude},${endLoc.latitude}`;
+      
+      const response = await fetch(apiUrl, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json, application/geo+json, application/gpx+xml, img/png; charset=utf-8',
+        }
+      });
+      
+      const json = await response.json();
+      
+      if (json.routes && json.routes.length > 0) {
+        const points = json.routes[0].geometry;
+        const decodedPoints = polyline.decode(points);
+        const coordinates = decodedPoints.map(point => ({
+          latitude: point[0],
+          longitude: point[1],
+        }));
+        setRouteCoordinates(coordinates);
+        return coordinates;
+      }
+      return [];
+    } catch (error) {
+      console.error('Error fetching directions:', error);
+      return [];
+    }
+  };
 
   useEffect(() => {
     if (expandedMapVisible) {
@@ -43,8 +77,16 @@ export default function DriverTrips({ navigation }) {
           setExpandedMapVisible(false);
           return;
         }
+        
+        const initialLocation = await Location.getCurrentPositionAsync({});
+        setDriverLocation(initialLocation.coords);
+        
         locationSubscription.current = await Location.watchPositionAsync(
-          { accuracy: Location.Accuracy.High, distanceInterval: 10 },
+          { 
+            accuracy: Location.Accuracy.High, 
+            distanceInterval: 10,
+            timeInterval: 5000 
+          },
           (location) => {
             setDriverLocation(location.coords);
           }
@@ -56,6 +98,7 @@ export default function DriverTrips({ navigation }) {
         locationSubscription.current = null;
       }
       setDriverLocation(null);
+      setRouteCoordinates([]);
     }
   }, [expandedMapVisible]);
 
@@ -94,18 +137,16 @@ export default function DriverTrips({ navigation }) {
           snapshot.forEach((docSnap) => {
             const data = docSnap.data();
 
-            let pickupLocation = data.pickupLocation;
-            if (data.pickup && data.pickup.latitude) {
-              pickupLocation = data.pickup;
+            let pickupLocation = null;
+            if (data.pickup && data.pickup.latitude && data.pickup.longitude) {
+              pickupLocation = {
+                latitude: data.pickup.latitude,
+                longitude: data.pickup.longitude,
+              };
             }
 
-            if (pickupLocation && pickupLocation.latitude) {
-              const rideCoords = {
-                latitude: pickupLocation.latitude,
-                longitude: pickupLocation.longitude,
-              };
-              const distanceKm = haversine(coords, rideCoords) / 1000;
-
+            if (pickupLocation) {
+              const distanceKm = haversine(coords, pickupLocation) / 1000;
               if (distanceKm <= 30) {
                 nearbyCount++;
               }
@@ -123,23 +164,24 @@ export default function DriverTrips({ navigation }) {
     }
   };
 
-  const openExpandedMap = (pickupLoc, dropoffLoc) => {
+  const openExpandedMap = async (pickupLoc, dropoffLoc) => {
     if (!pickupLoc || !dropoffLoc) return;
+    
     setExpandedMapPickup(pickupLoc);
     setExpandedMapDropoff(dropoffLoc);
+    await fetchDirections(pickupLoc, dropoffLoc);
     setExpandedMapVisible(true);
   };
 
   const getExpandedMapRegion = () => {
     if (!expandedMapPickup || !expandedMapDropoff) return null;
 
-    let latitudes = [expandedMapPickup.latitude, expandedMapDropoff.latitude];
-    let longitudes = [expandedMapPickup.longitude, expandedMapDropoff.longitude];
+    let coordinates = [expandedMapPickup, expandedMapDropoff];
+    if (driverLocation) coordinates.push(driverLocation);
+    if (routeCoordinates.length > 0) coordinates = [...coordinates, ...routeCoordinates];
 
-    if (driverLocation) {
-      latitudes.push(driverLocation.latitude);
-      longitudes.push(driverLocation.longitude);
-    }
+    const latitudes = coordinates.map(c => c.latitude);
+    const longitudes = coordinates.map(c => c.longitude);
 
     const minLat = Math.min(...latitudes);
     const maxLat = Math.max(...latitudes);
@@ -170,17 +212,23 @@ export default function DriverTrips({ navigation }) {
 
     const q = query(
       collection(db, 'rides'),
-      where('status', 'in', ['accepted', 'in_progress']),
+      where('status', 'in', ['accepted', 'in_progress', 'cancelled_by_driver']),
       where('acceptedBy', '==', driverId)
     );
 
     const unsubscribe = onSnapshot(
       q,
       (snapshot) => {
-        const data = snapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data(),
-        }));
+        const data = snapshot.docs.map(doc => {
+          const docData = doc.data();
+          return {
+            id: doc.id,
+            ...docData,
+            startTime: docData.startTime?.toDate ? docData.startTime.toDate() : docData.startTime,
+            endTime: docData.endTime?.toDate ? docData.endTime.toDate() : docData.endTime,
+            createdAt: docData.createdAt?.toDate ? docData.createdAt.toDate() : docData.createdAt,
+          };
+        });
         setTrips(data);
         setLoading(false);
       },
@@ -213,7 +261,7 @@ export default function DriverTrips({ navigation }) {
   const updateRide = async (rideId, updateFields, updateMaskFields) => {
     const updateUrl = `${RIDE_DOCUMENT_BASE_URL}/${rideId}?${updateMaskFields
       .map(f => `updateMask.fieldPaths=${f}`)
-      .join('&')}&key=${API_KEY}`;
+      .join('&')}`;
 
     const payload = { fields: updateFields };
 
@@ -258,6 +306,24 @@ export default function DriverTrips({ navigation }) {
     const coords = await getCurrentLocation();
     if (!coords) return;
 
+    const trip = trips.find(t => t.id === rideId);
+    const dropoff = getDropoffLocation(trip);
+
+    if (!dropoff) {
+      Alert.alert('Error', 'Dropoff location not available.');
+      return;
+    }
+
+    const distanceToDropoff = haversine(coords, dropoff);
+
+    if (distanceToDropoff > 50) {
+      Alert.alert(
+        'Too Far From Dropoff',
+        `You must be within 50 meters of the dropoff location to complete the trip. You're currently ${Math.round(distanceToDropoff)} meters away.`
+      );
+      return;
+    }
+
     const updateFields = {
       status: { stringValue: 'completed' },
       endTime: { timestampValue: new Date().toISOString() },
@@ -274,12 +340,74 @@ export default function DriverTrips({ navigation }) {
     await updateRide(rideId, updateFields, ['status', 'endTime', 'driverLocation']);
   };
 
+  const handleCancelTrip = async (rideId) => {
+    Alert.alert(
+      'Confirm Cancellation',
+      'Are you sure you want to cancel this trip?',
+      [
+        {
+          text: 'No',
+          style: 'cancel',
+        },
+        {
+          text: 'Yes',
+          onPress: async () => {
+            const coords = await getCurrentLocation();
+            if (!coords) return;
+
+            const updateFields = {
+              status: { stringValue: 'cancelled_by_driver' },
+              cancelledAt: { timestampValue: new Date().toISOString() },
+              driverLocation: {
+                mapValue: {
+                  fields: {
+                    latitude: { doubleValue: coords.latitude },
+                    longitude: { doubleValue: coords.longitude },
+                  },
+                },
+              },
+            };
+
+            await updateRide(rideId, updateFields, ['status', 'cancelledAt', 'driverLocation']);
+          },
+        },
+      ],
+      { cancelable: false }
+    );
+  };
+
   const getPickupLocation = (trip) => {
-    return trip.pickupLocation || trip.pickup || null;
+    if (trip.pickup && trip.pickup.latitude && trip.pickup.longitude) {
+      return {
+        latitude: trip.pickup.latitude,
+        longitude: trip.pickup.longitude,
+      };
+    }
+    return null;
   };
 
   const getDropoffLocation = (trip) => {
-    return trip.dropoffLocation || trip.dropoff || null;
+    if (trip.dropoff && trip.dropoff.latitude && trip.dropoff.longitude) {
+      return {
+        latitude: trip.dropoff.latitude,
+        longitude: trip.dropoff.longitude,
+      };
+    }
+    return null;
+  };
+
+  const getPickupAddress = (trip) => {
+    if (trip.pickup && trip.pickup.address) {
+      return trip.pickup.address;
+    }
+    return 'Pickup address not available';
+  };
+
+  const getDropoffAddress = (trip) => {
+    if (trip.dropoff && trip.dropoff.address) {
+      return trip.dropoff.address;
+    }
+    return 'Dropoff address not available';
   };
 
   const formatAddress = (address) => {
@@ -294,15 +422,27 @@ export default function DriverTrips({ navigation }) {
     return `${distance.toFixed(1)} km`;
   };
 
+  const getFare = (trip) => {
+    const price = parseFloat(trip.price);
+    return !isNaN(price) ? `$${price.toFixed(2)}` : 'N/A';
+  };
+
   const renderTripItem = ({ item: trip }) => {
     const pickupLoc = getPickupLocation(trip);
     const dropoffLoc = getDropoffLocation(trip);
+    const pickupAddress = getPickupAddress(trip);
+    const dropoffAddress = getDropoffAddress(trip);
 
     return (
       <View style={styles.tripItem}>
         <View style={styles.tripHeader}>
           <Text style={styles.tripId}>Trip #{trip.id.slice(-6)}</Text>
-          <View style={[styles.statusBadge, { backgroundColor: trip.status === 'accepted' ? '#ff9500' : '#007AFF' }]}>
+          <View style={[styles.statusBadge, { 
+            backgroundColor: 
+              trip.status === 'accepted' ? '#ff9500' : 
+              trip.status === 'in_progress' ? '#007AFF' :
+              trip.status === 'cancelled_by_driver' ? '#FF3B30' : '#8E8E93'
+          }]}>
             <Text style={styles.statusText}>{trip.status.replace('_', ' ').toUpperCase()}</Text>
           </View>
         </View>
@@ -314,7 +454,7 @@ export default function DriverTrips({ navigation }) {
             </View>
             <View style={styles.locationDetails}>
               <Text style={styles.locationLabel}>Pickup</Text>
-              <Text style={styles.locationAddress}>{formatAddress(trip.pickupAddress)}</Text>
+              <Text style={styles.locationAddress}>{pickupAddress}</Text>
             </View>
           </View>
 
@@ -324,16 +464,40 @@ export default function DriverTrips({ navigation }) {
             </View>
             <View style={styles.locationDetails}>
               <Text style={styles.locationLabel}>Dropoff</Text>
-              <Text style={styles.locationAddress}>{formatAddress(trip.dropoffAddress)}</Text>
+              <Text style={styles.locationAddress}>{dropoffAddress}</Text>
             </View>
           </View>
         </View>
 
         <View style={styles.tripDetails}>
           <Text style={styles.detailText}>Distance: {calculateDistance(pickupLoc, dropoffLoc)}</Text>
-          <Text style={styles.detailText}>Fare: ${trip.fare || 'N/A'}</Text>
-          <Text style={styles.detailText}>Passenger: {trip.passengerName || 'N/A'}</Text>
+          <Text style={styles.detailText}>Fare: {getFare(trip)}</Text>
+          <Text style={styles.detailText}>Payment: {trip.paymentMethod || 'N/A'}</Text>
         </View>
+
+        {trip.startTime && (
+          <View style={styles.timeInfo}>
+            <Text style={styles.timeText}>
+              Started: {trip.startTime instanceof Date ? trip.startTime.toLocaleString() : new Date(trip.startTime).toLocaleString()}
+            </Text>
+          </View>
+        )}
+
+        {trip.cancelledAt && (
+          <View style={styles.timeInfo}>
+            <Text style={styles.timeText}>
+              Cancelled: {trip.cancelledAt instanceof Date ? trip.cancelledAt.toLocaleString() : new Date(trip.cancelledAt).toLocaleString()}
+            </Text>
+          </View>
+        )}
+
+        {trip.endTime && (
+          <View style={styles.timeInfo}>
+            <Text style={styles.timeText}>
+              Completed: {trip.endTime instanceof Date ? trip.endTime.toLocaleString() : new Date(trip.endTime).toLocaleString()}
+            </Text>
+          </View>
+        )}
 
         <View style={styles.actionButtons}>
           {trip.status === 'accepted' && (
@@ -350,6 +514,14 @@ export default function DriverTrips({ navigation }) {
               onPress={() => handleCompleteTrip(trip.id)}
             >
               <Text style={styles.buttonText}>Complete Trip</Text>
+            </TouchableOpacity>
+          )}
+          {(trip.status === 'accepted' || trip.status === 'in_progress') && (
+            <TouchableOpacity
+              style={[styles.actionButton, styles.cancelButton]}
+              onPress={() => handleCancelTrip(trip.id)}
+            >
+              <Text style={styles.buttonText}>Cancel Trip</Text>
             </TouchableOpacity>
           )}
           {(pickupLoc && dropoffLoc) && (
@@ -394,7 +566,7 @@ export default function DriverTrips({ navigation }) {
         <Text style={styles.headerTitle}>Your Trips</Text>
         <TouchableOpacity
           style={styles.availableRidesButton}
-          onPress={() => navigation.navigate('AvailableRides')}
+          onPress={() => navigation.navigate('DriverMain', { screen: 'DriverHome' })}
         >
           <Text style={styles.availableRidesText}>Available Rides ({availableRidesCount})</Text>
         </TouchableOpacity>
@@ -415,7 +587,6 @@ export default function DriverTrips({ navigation }) {
         />
       )}
 
-      {/* Expanded Map Modal */}
       <Modal
         visible={expandedMapVisible}
         animationType="slide"
@@ -424,24 +595,52 @@ export default function DriverTrips({ navigation }) {
         <SafeAreaView style={styles.modalContainer}>
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Trip Route</Text>
-            <Pressable style={styles.closeButton} onPress={() => setExpandedMapVisible(false)}>
-              <Text style={styles.closeButtonText}>✕</Text>
-            </Pressable>
+            <View style={styles.modalHeaderButtons}>
+              <Pressable 
+                style={styles.recenterButton}
+                onPress={() => {
+                  if (driverLocation) {
+                    mapRef.current?.animateToRegion({
+                      latitude: driverLocation.latitude,
+                      longitude: driverLocation.longitude,
+                      latitudeDelta: 0.02,
+                      longitudeDelta: 0.02,
+                    });
+                  }
+                }}
+              >
+                <Ionicons name="locate" size={20} color="#007AFF" />
+              </Pressable>
+              <Pressable style={styles.closeButton} onPress={() => setExpandedMapVisible(false)}>
+                <Text style={styles.closeButtonText}>✕</Text>
+              </Pressable>
+            </View>
           </View>
 
           {expandedMapPickup && expandedMapDropoff && (
             <MapView
+              ref={mapRef}
               style={styles.expandedMap}
-              region={getExpandedMapRegion()}
+              initialRegion={getExpandedMapRegion()}
               showsUserLocation={true}
-              showsMyLocationButton={true}
+              showsMyLocationButton={false}
+              followsUserLocation={true}
             >
               <Marker coordinate={expandedMapPickup} title="Pickup Location" pinColor="green" />
               <Marker coordinate={expandedMapDropoff} title="Dropoff Location" pinColor="red" />
               {driverLocation && (
                 <Marker coordinate={driverLocation} title="Your Location" pinColor="blue" />
               )}
-              <Polyline coordinates={[expandedMapPickup, expandedMapDropoff]} strokeColor="#007AFF" strokeWidth={3} />
+              {routeCoordinates.length > 0 && (
+              <Polyline
+  coordinates={routeCoordinates}
+  strokeColor="#3498db"
+  strokeWidth={5}
+  lineDashPattern={null} // Remove if you used it
+  zIndex={10} // Ensure it renders above base map
+/>
+
+              )}
             </MapView>
           )}
         </SafeAreaView>
@@ -449,8 +648,6 @@ export default function DriverTrips({ navigation }) {
     </SafeAreaView>
   );
 }
-
-
 
 const styles = StyleSheet.create({
   container: {
@@ -587,25 +784,39 @@ const styles = StyleSheet.create({
     color: '#666',
     flex: 1,
   },
+  timeInfo: {
+    marginBottom: 8,
+  },
+  timeText: {
+    fontSize: 12,
+    color: '#666',
+    fontStyle: 'italic',
+  },
   actionButtons: {
     flexDirection: 'row',
     justifyContent: 'space-between',
+    flexWrap: 'wrap',
   },
   actionButton: {
     flex: 1,
+    minWidth: 100,
     paddingVertical: 10,
     borderRadius: 8,
     alignItems: 'center',
     marginHorizontal: 4,
+    marginVertical: 4,
   },
   startButton: {
     backgroundColor: '#34C759',
   },
   completeButton: {
-    backgroundColor: '#FF3B30',
+    backgroundColor: '#007AFF',
+  },
+  cancelButton: {
+    backgroundColor: '#FF9500',
   },
   mapButton: {
-    backgroundColor: '#007AFF',
+    backgroundColor: '#8E8E93',
   },
   buttonText: {
     color: '#fff',
@@ -624,6 +835,10 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#e0e0e0',
   },
+  modalHeaderButtons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   modalTitle: {
     fontSize: 18,
     fontWeight: '600',
@@ -631,29 +846,40 @@ const styles = StyleSheet.create({
   },
   closeButton: {
     padding: 8,
+    marginLeft: 10,
   },
   closeButtonText: {
     fontSize: 18,
     color: '#007AFF',
   },
+  recenterButton: {
+    backgroundColor: 'white',
+    padding: 8,
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
   expandedMap: {
     flex: 1,
   },
   chatButton: {
-  flexDirection: 'row',
-  alignItems: 'center',
-  paddingVertical: 4,
-  paddingHorizontal: 8,
-  borderRadius: 6,
-  borderWidth: 1,
-  borderColor: '#007bff',
-  marginTop: 8,
-},
-chatButtonText: {
-  marginLeft: 6,
-  fontSize: 14,
-  color: '#007bff',
-  fontWeight: '600',
-},
-
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#007bff',
+    marginTop: 8,
+  },
+  chatButtonText: {
+    marginLeft: 6,
+    fontSize: 14,
+    color: '#007bff',
+    fontWeight: '600',
+  },
 });

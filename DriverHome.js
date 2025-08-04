@@ -27,7 +27,7 @@ import {
   serverTimestamp,
 } from 'firebase/firestore';
 import { useColorScheme } from 'react-native';
-
+import { getDocs } from 'firebase/firestore';
 
 export default function DriverHome({ navigation }) {
   const [driverLocation, setDriverLocation] = useState(null);
@@ -38,9 +38,8 @@ export default function DriverHome({ navigation }) {
   const [selectedRideType, setSelectedRideType] = useState('All');
   const [acceptedRidesCount, setAcceptedRidesCount] = useState(0);
   const colorScheme = useColorScheme();
-const isDarkMode = colorScheme === 'dark';
-const styles = createStyles(isDarkMode);
-
+  const isDarkMode = colorScheme === 'dark';
+  const styles = createStyles(isDarkMode);
 
   // Keep reference to location subscription to remove on cleanup
   const locationSubscriptionRef = useRef(null);
@@ -48,12 +47,19 @@ const styles = createStyles(isDarkMode);
   const ridesUnsubscribeRef = useRef(null);
   // Keep unsubscribe function for accepted rides count
   const acceptedRidesUnsubscribeRef = useRef(null);
+  // Add throttling ref for subscriptions
+  const subscribeToRidesThrottled = useRef(null);
 
   useEffect(() => {
     startTracking();
     subscribeToAcceptedRides();
 
     return () => {
+      // Clear throttled subscription
+      if (subscribeToRidesThrottled.current) {
+        clearTimeout(subscribeToRidesThrottled.current);
+      }
+      
       if (locationSubscriptionRef.current) {
         locationSubscriptionRef.current.remove();
       }
@@ -104,29 +110,41 @@ const styles = createStyles(isDarkMode);
     };
     setDriverLocation(coords);
     await updateDriverLocation(coords);
-    setLoading(false);
 
-    // Subscribe to Firestore rides query with real-time updates
+    // Subscribe to Firestore rides query with real-time updates (initial subscription)
     subscribeToRides(coords);
 
-    // Start location watcher
+    // Start location watcher with less frequent updates
     locationSubscriptionRef.current = await Location.watchPositionAsync(
       {
         accuracy: Location.Accuracy.High,
-        distanceInterval: 10,
-        timeInterval: 10000,
+        distanceInterval: 50, // Increased from 10 to reduce frequency
+        timeInterval: 30000,  // Increased from 10000 to 30 seconds
       },
       async (loc) => {
         const newCoords = {
           latitude: loc.coords.latitude,
           longitude: loc.coords.longitude,
         };
+        
+        // Only update if location changed significantly
+        const oldCoords = driverLocation;
+        if (oldCoords) {
+          const distance = haversine(oldCoords, newCoords);
+          if (distance < 100) { // Less than 100 meters, skip update
+            return;
+          }
+        }
+        
         setDriverLocation(newCoords);
         await updateDriverLocation(newCoords);
-        // Update rides subscription based on new location
+        
+        // Re-subscribe only if location changed significantly
         subscribeToRides(newCoords);
       }
     );
+    
+    setLoading(false);
   };
 
   const updateDriverLocation = async (coords) => {
@@ -184,69 +202,101 @@ const styles = createStyles(isDarkMode);
     }
   };
 
-  // Subscribe or re-subscribe to rides near the current location
+  // Modified subscribeToRides with throttling and better duplicate prevention
   const subscribeToRides = (coords) => {
-    // Unsubscribe previous listener to avoid duplicates
-    if (ridesUnsubscribeRef.current) {
-      ridesUnsubscribeRef.current();
+    // Clear any existing throttled call
+    if (subscribeToRidesThrottled.current) {
+      clearTimeout(subscribeToRidesThrottled.current);
     }
 
-    setLoading(true);
-
-    const ridesQuery = query(
-      collection(db, 'rides'),
-      where('status', '==', 'pending')
-    );
-
-    ridesUnsubscribeRef.current = onSnapshot(
-      ridesQuery,
-      (snapshot) => {
-        const nearbyRides = [];
-
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          
-          // Handle both nested object structure and direct structure
-          let pickupLocation = data.pickupLocation;
-          if (data.pickup && data.pickup.latitude) {
-            pickupLocation = data.pickup;
-          }
-          
-          if (!pickupLocation || !pickupLocation.latitude) return;
-          
-          const rideCoords = {
-            latitude: pickupLocation.latitude,
-            longitude: pickupLocation.longitude,
-          };
-          const distanceKm = haversine(coords, rideCoords) / 1000;
-
-          if (distanceKm <= 30) {
-            nearbyRides.push({
-              id: docSnap.id,
-              pickup: pickupLocation.address || data.pickup?.address || 'N/A',
-              dropoff: data.dropoffLocation?.address || data.dropoff?.address || 'N/A',
-              rideType: data.rideType || 'taxi',
-              passengerCount: data.passengerCount || '1',
-              scheduledTime: data.scheduledTime ? data.scheduledTime.toDate() : '',
-              specialRequests: data.specialRequests || '',
-              location: rideCoords,
-              distance: distanceKm.toFixed(1),
-            });
-          }
-        });
-
-        // Sort by distance (closest first)
-        nearbyRides.sort((a, b) => parseFloat(a.distance) - parseFloat(b.distance));
-        
-        setRides(nearbyRides);
-        setLoading(false);
-      },
-      (error) => {
-        console.error('Error fetching rides:', error);
-        setError('Failed to fetch rides');
-        setLoading(false);
+    // Throttle the subscription to prevent frequent re-subscriptions
+    subscribeToRidesThrottled.current = setTimeout(() => {
+      // Unsubscribe previous listener to avoid duplicates
+      if (ridesUnsubscribeRef.current) {
+        ridesUnsubscribeRef.current();
+        ridesUnsubscribeRef.current = null;
       }
-    );
+
+      console.log('Creating new rides subscription at:', new Date().toISOString());
+      setLoading(true);
+
+      const ridesQuery = query(
+        collection(db, 'rides'),
+        where('status', '==', 'pending')
+      );
+
+      ridesUnsubscribeRef.current = onSnapshot(
+        ridesQuery,
+        (snapshot) => {
+          const nearbyRides = [];
+          const processedRideIds = new Set();
+
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data();
+            const rideId = docSnap.id;
+
+            // Skip if already processed (additional safety)
+            if (processedRideIds.has(rideId)) {
+              console.warn(`Duplicate ride ID detected: ${rideId}`);
+              return;
+            }
+            processedRideIds.add(rideId);
+
+            // Handle both nested and flat pickup structure
+            let pickupLocation = data.pickupLocation;
+            if (data.pickup && data.pickup.latitude) {
+              pickupLocation = data.pickup;
+            }
+
+            if (!pickupLocation || !pickupLocation.latitude) return;
+
+            const rideCoords = {
+              latitude: pickupLocation.latitude,
+              longitude: pickupLocation.longitude,
+            };
+
+            const distanceKm = haversine(coords, rideCoords) / 1000;
+
+            if (distanceKm <= 30) {
+              nearbyRides.push({
+                id: rideId,
+                pickup: pickupLocation.address || data.pickup?.address || 'N/A',
+                dropoff: data.dropoffLocation?.address || data.dropoff?.address || 'N/A',
+                rideType: data.rideType || 'taxi',
+                passengerCount: data.passengerCount || '1',
+                scheduledTime: data.scheduledTime ? data.scheduledTime.toDate() : '',
+                specialRequests: data.specialRequests || '',
+                location: rideCoords,
+                distance: distanceKm.toFixed(1),
+              });
+            }
+          });
+
+          // Sort by distance (closest rides first)
+          nearbyRides.sort((a, b) => parseFloat(a.distance) - parseFloat(b.distance));
+
+          // Use functional update to avoid stale closure issues
+          setRides(prevRides => {
+            // Only update if the rides have actually changed
+            const ridesChanged = JSON.stringify(prevRides.map(r => r.id).sort()) !== 
+                               JSON.stringify(nearbyRides.map(r => r.id).sort());
+            
+            if (ridesChanged) {
+              console.log(`Rides updated: ${nearbyRides.length} rides found`);
+              return nearbyRides;
+            }
+            return prevRides;
+          });
+          
+          setLoading(false);
+        },
+        (error) => {
+          console.error('Error fetching rides:', error);
+          setError('Failed to fetch rides');
+          setLoading(false);
+        }
+      );
+    }, 2000); // 2-second throttle
   };
 
   const handleAccept = async (rideId) => {
@@ -256,9 +306,25 @@ const styles = createStyles(isDarkMode);
       return;
     }
 
-    const rideRef = doc(db, 'rides', rideId);
+    // First check if the driver already has an active ride
+    const activeRidesQuery = query(
+      collection(db, 'rides'),
+      where('acceptedBy', '==', driverId),
+      where('status', 'in', ['accepted', 'in_progress'])
+    );
 
     try {
+      const activeRidesSnapshot = await getDocs(activeRidesQuery);
+      if (!activeRidesSnapshot.empty) {
+        Alert.alert(
+          'Active Trip Exists',
+          'You already have an active trip. Complete or cancel it before accepting a new ride.'
+        );
+        return;
+      }
+
+      const rideRef = doc(db, 'rides', rideId);
+
       await runTransaction(db, async (transaction) => {
         const rideDoc = await transaction.get(rideRef);
         if (!rideDoc.exists()) throw 'Ride does not exist!';
@@ -273,20 +339,13 @@ const styles = createStyles(isDarkMode);
       });
 
       Alert.alert(
-        'Success', 
+        'Success',
         'Ride accepted successfully. Go to My Trips to manage it.',
         [
-          {
-            text: 'Stay Here',
-            style: 'cancel'
-          },
-          {
-            text: 'Go to Trips',
-            onPress: () => navigation.navigate('DriverTrips')
-          }
+          { text: 'Stay Here', style: 'cancel' },
+          { text: 'Go to Trips', onPress: () => navigation.navigate('DriverTrips') },
         ]
       );
-      
     } catch (error) {
       console.error('Accept ride error:', error);
       Alert.alert('Error', error.toString());
@@ -309,11 +368,6 @@ const styles = createStyles(isDarkMode);
         if (!rideDoc.exists()) {
           throw 'Ride does not exist!';
         }
-
-        // Optional: Check current status if you only want to decline 'pending' rides
-        // if (rideDoc.data().status !== 'pending') {
-        //   throw 'Ride is not in a pending state to be declined.';
-        // }
 
         transaction.update(rideRef, {
           status: 'declined',

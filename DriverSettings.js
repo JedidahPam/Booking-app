@@ -1,3 +1,4 @@
+// DriverSettings.js - Updated Version
 import React, { useEffect, useState } from 'react';
 import {
   View,
@@ -8,13 +9,15 @@ import {
   Alert,
   SafeAreaView,
   ActivityIndicator,
+  RefreshControl,
+  ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from './ThemeContext';
 import { useNavigation } from '@react-navigation/native';
 import { signOut } from 'firebase/auth';
-import { auth, db } from './firebaseConfig';
-import { doc, getDoc } from 'firebase/firestore';
+import { auth } from './firebaseConfig';
+import { getDriverStatistics, initializeDriverStats } from './driverStatsService';
 
 export default function DriverSettings() {
   const { darkMode, setDarkMode } = useTheme();
@@ -23,34 +26,67 @@ export default function DriverSettings() {
 
   const [stats, setStats] = useState(null);
   const [loadingStats, setLoadingStats] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const fetchDriverStats = async () => {
+    try {
+      const driverId = auth.currentUser?.uid;
+      if (!driverId) throw new Error('User not authenticated');
+
+      console.log('Fetching stats for driver:', driverId);
+      const driverStats = await getDriverStatistics(driverId);
+      setStats(driverStats);
+    } catch (error) {
+      console.error('Error fetching driver stats:', error);
+      Alert.alert('Error', 'Failed to load driver statistics.');
+      
+      // Set default stats if fetch fails
+      setStats({
+        totalTrips: 0,
+        totalEarnings: 0,
+        averageRating: 0,
+        completionRate: 100,
+        totalRatings: 0,
+        completedTrips: 0,
+        cancelledTrips: 0,
+        monthlyEarnings: 0,
+        monthlyTrips: 0
+      });
+    } finally {
+      setLoadingStats(false);
+      setRefreshing(false);
+    }
+  };
 
   useEffect(() => {
-    const fetchDriverStats = async () => {
+    const initializeAndFetch = async () => {
       try {
         const driverId = auth.currentUser?.uid;
-        if (!driverId) throw new Error('User not authenticated');
-
-        const docRef = doc(db, 'drivers', driverId);
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          setStats(docSnap.data());
-        } else {
-          setStats({
-            totalTrips: 0,
-            totalEarnings: 0,
-            averageRating: 0,
+        if (driverId) {
+          console.log('Initializing driver stats for:', driverId);
+          
+          // Initialize driver stats if they don't exist
+          await initializeDriverStats(driverId, {
+            name: auth.currentUser?.displayName || '',
+            email: auth.currentUser?.email || ''
           });
+          
+          // Then fetch the stats
+          await fetchDriverStats();
         }
       } catch (error) {
-        console.error('Error fetching driver stats:', error);
-        Alert.alert('Error', 'Failed to load driver statistics.');
-      } finally {
+        console.error('Error initializing driver:', error);
         setLoadingStats(false);
       }
     };
 
-    fetchDriverStats();
+    initializeAndFetch();
   }, []);
+
+  const onRefresh = () => {
+    setRefreshing(true);
+    fetchDriverStats();
+  };
 
   const toggleDarkMode = () => {
     setDarkMode((prev) => !prev);
@@ -92,33 +128,64 @@ export default function DriverSettings() {
           <Ionicons name="arrow-back" size={28} color={darkMode ? '#FFA500' : '#444'} />
         </TouchableOpacity>
         <Text style={styles.title}>Settings</Text>
-        <View style={{ width: 40 }} /> {/* Placeholder for alignment */}
+        <TouchableOpacity onPress={onRefresh} style={styles.refreshButton}>
+          <Ionicons name="refresh" size={24} color={darkMode ? '#FFA500' : '#444'} />
+        </TouchableOpacity>
       </View>
 
-      <View style={styles.content}>
+      <ScrollView 
+        style={styles.content}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
+        }
+      >
         {/* Driver Stats */}
         <Text style={styles.sectionTitle}>Driver Statistics</Text>
         {loadingStats ? (
-          <ActivityIndicator size="small" color={darkMode ? '#FFA500' : '#007AFF'} />
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color={darkMode ? '#FFA500' : '#007AFF'} />
+            <Text style={styles.loadingText}>Loading statistics...</Text>
+          </View>
         ) : (
-          <View style={styles.statsContainer}>
-            <View style={styles.statCard}>
-              <Text style={styles.statNumber}>{stats?.totalTrips ?? 0}</Text>
-              <Text style={styles.statLabel}>Total Trips</Text>
+          <View>
+            {/* Main Stats Row */}
+            <View style={styles.statsContainer}>
+              <View style={styles.statCard}>
+                <Text style={styles.statNumber}>{stats?.totalTrips ?? 0}</Text>
+                <Text style={styles.statLabel}>Total Trips</Text>
+              </View>
+              <View style={styles.statCard}>
+                <Text style={styles.statNumber}>${stats?.totalEarnings?.toFixed(2) ?? '0.00'}</Text>
+                <Text style={styles.statLabel}>Total Earnings</Text>
+              </View>
+              <View style={styles.statCard}>
+                <Text style={styles.statNumber}>{stats?.averageRating?.toFixed(1) ?? '0.0'}</Text>
+                <Text style={styles.statLabel}>Rating ({stats?.totalRatings ?? 0})</Text>
+              </View>
             </View>
-            <View style={styles.statCard}>
-              <Text style={styles.statNumber}>${stats?.totalEarnings?.toFixed(2) ?? '0.00'}</Text>
-              <Text style={styles.statLabel}>Total Earnings</Text>
-            </View>
-            <View style={styles.statCard}>
-              <Text style={styles.statNumber}>{stats?.averageRating?.toFixed(1) ?? '0.0'}</Text>
-              <Text style={styles.statLabel}>Average Rating</Text>
+
+            {/* Secondary Stats Row */}
+            <View style={[styles.statsContainer, { marginTop: 12 }]}>
+              <View style={styles.statCard}>
+                <Text style={styles.statNumber}>{stats?.completedTrips ?? 0}</Text>
+                <Text style={styles.statLabel}>Completed</Text>
+              </View>
+              <View style={styles.statCard}>
+                <Text style={styles.statNumber}>{stats?.completionRate?.toFixed(1) ?? '100.0'}%</Text>
+                <Text style={styles.statLabel}>Completion Rate</Text>
+              </View>
+              <View style={styles.statCard}>
+                <Text style={styles.statNumber}>${stats?.monthlyEarnings?.toFixed(2) ?? '0.00'}</Text>
+                <Text style={styles.statLabel}>This Month</Text>
+              </View>
             </View>
           </View>
         )}
 
-        {/* Other Settings */}
-        <View style={[styles.settingRow, { marginTop: 30 }]}>
+        {/* Settings Section */}
+        <Text style={[styles.sectionTitle, { marginTop: 30 }]}>Preferences</Text>
+        
+        <View style={styles.settingRow}>
           <Text style={styles.label}>Dark Mode</Text>
           <Switch
             value={darkMode}
@@ -143,6 +210,20 @@ export default function DriverSettings() {
         </TouchableOpacity>
 
         <TouchableOpacity
+          style={styles.settingRow}
+          onPress={() => navigation.navigate('EarningsDetail')}
+          accessibilityLabel="View detailed earnings"
+          accessibilityRole="button"
+        >
+          <Text style={styles.label}>Earnings Breakdown</Text>
+          <Ionicons
+            name="analytics-outline"
+            size={22}
+            color={darkMode ? '#FFA500' : '#444'}
+          />
+        </TouchableOpacity>
+
+        <TouchableOpacity
           style={styles.logoutBtn}
           onPress={handleLogout}
           accessibilityLabel="Log out"
@@ -150,7 +231,7 @@ export default function DriverSettings() {
         >
           <Text style={styles.logoutText}>Log Out</Text>
         </TouchableOpacity>
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -177,6 +258,12 @@ const createStyles = (darkMode) =>
       justifyContent: 'center',
       alignItems: 'center',
     },
+    refreshButton: {
+      padding: 4,
+      width: 40,
+      justifyContent: 'center',
+      alignItems: 'center',
+    },
     title: {
       fontSize: 20,
       fontWeight: 'bold',
@@ -186,6 +273,15 @@ const createStyles = (darkMode) =>
       flex: 1,
       paddingHorizontal: 20,
       paddingTop: 20,
+    },
+    loadingContainer: {
+      alignItems: 'center',
+      paddingVertical: 40,
+    },
+    loadingText: {
+      marginTop: 10,
+      color: darkMode ? '#ccc' : '#666',
+      fontSize: 16,
     },
     sectionTitle: {
       fontSize: 18,
@@ -214,15 +310,16 @@ const createStyles = (darkMode) =>
       alignItems: 'center',
     },
     statNumber: {
-      fontSize: 22,
+      fontSize: 20,
       fontWeight: 'bold',
       color: darkMode ? '#FFA500' : '#007AFF',
       marginBottom: 6,
     },
     statLabel: {
-      fontSize: 14,
+      fontSize: 12,
       color: darkMode ? '#ccc' : '#555',
       fontWeight: '600',
+      textAlign: 'center',
     },
     settingRow: {
       flexDirection: 'row',
@@ -252,6 +349,7 @@ const createStyles = (darkMode) =>
       borderRadius: 12,
       alignItems: 'center',
       marginTop: 40,
+      marginBottom: 30,
       shadowColor: '#FF6B6B',
       shadowOffset: { width: 0, height: 4 },
       shadowOpacity: 0.8,

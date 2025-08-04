@@ -7,7 +7,19 @@
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
-    "plugins": ["expo-firebase-core"],
+    "plugins": [
+      "expo-firebase-core",
+      [
+        "expo-notifications",
+        {
+          "ios": {
+            "foregroundPresentationOptions": {
+              "alert": true
+            }
+          }
+        }
+      ]
+    ],
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",

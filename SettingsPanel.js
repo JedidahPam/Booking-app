@@ -7,14 +7,17 @@ import {
   Dimensions,
   TouchableOpacity,
   SafeAreaView,
+  useColorScheme,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
 
-export default function SettingsPanel({ visible, onClose, children, darkMode = false }) {
+export default function SettingsPanel({ visible, onClose, children }) {
   const slideAnim = useRef(new Animated.Value(SCREEN_WIDTH)).current;
   const [isMounted, setIsMounted] = useState(visible);
+  const scheme = useColorScheme();
+  const darkMode = scheme === 'dark';
 
   useEffect(() => {
     if (visible) {
@@ -39,13 +42,17 @@ export default function SettingsPanel({ visible, onClose, children, darkMode = f
 
   return (
     <TouchableWithoutFeedback onPress={onClose}>
-      <View style={[styles.overlay, { backgroundColor: darkMode ? 'rgba(0,0,0,0.7)' : 'rgba(0,0,0,0.5)' }]}>
+      <View
+        style={[
+          styles.overlay,
+          {backgroundColor: darkMode ? '#000' : 'rgba(0,0,0,0.5)' },
+        ]}
+      >
         <Animated.View
           style={[
             styles.panel,
             {
               transform: [{ translateX: slideAnim }],
-              backgroundColor: darkMode ? '#121212' : '#fff',
             },
           ]}
         >
@@ -54,9 +61,7 @@ export default function SettingsPanel({ visible, onClose, children, darkMode = f
               <Ionicons name="close" size={28} color={darkMode ? '#fff' : '#000'} />
             </TouchableOpacity>
 
-            <View style={styles.content}>
-              {children}
-            </View>
+            <View style={styles.content}>{children}</View>
           </SafeAreaView>
         </Animated.View>
       </View>
@@ -67,7 +72,10 @@ export default function SettingsPanel({ visible, onClose, children, darkMode = f
 const styles = StyleSheet.create({
   overlay: {
     position: 'absolute',
-    top: 0, left: 0, right: 0, bottom: 0,
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     zIndex: 1000,
     elevation: 1000,
   },
@@ -79,7 +87,6 @@ const styles = StyleSheet.create({
     height: '100%',
     paddingTop: 40,
     paddingHorizontal: 20,
-    // backgroundColor is now set dynamically
   },
   closeButton: {
     position: 'absolute',
@@ -90,4 +97,14 @@ const styles = StyleSheet.create({
   content: {
     flex: 1,
   },
+  panel: {
+  position: 'absolute',
+  top: 0,
+  right: 0,
+  width: SCREEN_WIDTH * 0.75,
+  height: '100%',
+  paddingTop: 40,
+  paddingHorizontal: 0, // optional for flush edges
+  backgroundColor: 'transparent', // <-- this ensures no override
+}
 });
