@@ -64,7 +64,9 @@ export default function TravelDetailsScreen() {
   const [paymentMethod, setPaymentMethod] = useState('cash');
   const [paymentModalVisible, setPaymentModalVisible] = useState(false);
   const modalizeRef = useRef(null);
-
+  const [hasActiveRide, setHasActiveRide] = useState(false);
+  const [activeRideId, setActiveRideId] = useState(null);
+  
   // Driver tracking states
   const [rideStatus, setRideStatus] = useState(null);
   const [currentRideId, setCurrentRideId] = useState(null);
@@ -83,6 +85,62 @@ export default function TravelDetailsScreen() {
   const pickupInputRef = useRef(null);
   const dropoffInputRef = useRef(null);
 
+  // Check for active rides when component mounts
+ useEffect(() => {
+  const checkActiveRides = async () => {
+    if (!auth.currentUser) return;
+    
+    try {
+      const ridesRef = collection(db, 'rides');
+      const q = query(
+        ridesRef,
+        where('userId', '==', auth.currentUser.uid),
+        where('status', 'in', ['pending', 'accepted', 'in-progress', 'cancelled_by_driver'])
+      );
+      
+      const querySnapshot = await getDocs(q);
+      const hasActive = !querySnapshot.empty;
+      setHasActiveRide(hasActive);
+      
+      if (hasActive) {
+        const activeRide = querySnapshot.docs[0].data();
+        setActiveRideId(activeRide.rideId);
+        setCurrentRideId(activeRide.rideId);
+        setRideStatus(activeRide.status);
+        
+        // If ride was cancelled by driver, show appropriate message
+        if (activeRide.status === 'cancelled_by_driver') {
+          Alert.alert(
+            'Ride Cancelled', 
+            'The driver has cancelled your ride. Please book a new one.',
+            [
+              {
+                text: 'OK',
+                onPress: () => {
+                  // Reset ride status
+                  setHasActiveRide(false);
+                  setActiveRideId(null);
+                  setCurrentRideId(null);
+                  setRideStatus(null);
+                }
+              }
+            ]
+          );
+        }
+        
+        // If ride is in progress, set driver location
+        if (activeRide.status === 'in-progress' && activeRide.driverLocation) {
+          setDriverLocationUpdates(activeRide.driverLocation);
+        }
+      }
+    } catch (error) {
+      console.error('Error checking active rides:', error);
+    }
+  };
+  
+  checkActiveRides();
+}, []);
+
   const collapseSheet = () => {
     modalizeRef.current?.snapToIndex(0);
   };
@@ -99,36 +157,69 @@ export default function TravelDetailsScreen() {
 
   // Track driver location when ride is in progress
   useEffect(() => {
-    if (!currentRideId || !selectedDriver) return;
+  if (!currentRideId || !selectedDriver) return;
 
-    const unsubscribe = onSnapshot(doc(db, 'rides', currentRideId), (doc) => {
-      const rideData = doc.data();
-      setRideStatus(rideData.status);
+  const unsubscribe = onSnapshot(doc(db, 'rides', currentRideId), (doc) => {
+    const rideData = doc.data();
+    setRideStatus(rideData.status);
+    
+    // Update active ride status
+    if (['completed', 'cancelled', 'declined', 'cancelled_by_driver'].includes(rideData.status)) {
+      setHasActiveRide(false);
+      setActiveRideId(null);
       
-      if (rideData.status === 'in-progress' && rideData.driverLocation) {
-        setDriverLocationUpdates(rideData.driverLocation);
-        const eta = calculateEta(rideData.driverLocation, pickup);
-        setTrackingEta(eta);
-        
-        // Update map region to show both user and driver
-        if (pickup) {
-          const centerLat = (rideData.driverLocation.latitude + pickup.latitude) / 2;
-          const centerLng = (rideData.driverLocation.longitude + pickup.longitude) / 2;
-          const deltaLat = Math.abs(rideData.driverLocation.latitude - pickup.latitude) * 1.5 || 0.05;
-          const deltaLng = Math.abs(rideData.driverLocation.longitude - pickup.longitude) * 1.5 || 0.05;
-          setRegion({ latitude: centerLat, longitude: centerLng, latitudeDelta: deltaLat, longitudeDelta: deltaLng });
-        }
+      if (rideData.status === 'cancelled_by_driver') {
+        Alert.alert(
+          'Ride Cancelled', 
+          'The driver has cancelled your ride. Please book a new one.'
+        );
       }
-    });
+    }
 
-    return () => unsubscribe();
-  }, [currentRideId, selectedDriver, pickup]);
+    if (rideData.status === 'in-progress' && rideData.driverLocation) {
+      setDriverLocationUpdates(rideData.driverLocation);
+      const eta = calculateEta(rideData.driverLocation, pickup);
+      setTrackingEta(eta);
+      
+      // Update map region to show both user and driver
+      if (pickup) {
+        const centerLat = (rideData.driverLocation.latitude + pickup.latitude) / 2;
+        const centerLng = (rideData.driverLocation.longitude + pickup.longitude) / 2;
+        const deltaLat = Math.abs(rideData.driverLocation.latitude - pickup.latitude) * 1.5 || 0.05;
+        const deltaLng = Math.abs(rideData.driverLocation.longitude - pickup.longitude) * 1.5 || 0.05;
+        setRegion({ latitude: centerLat, longitude: centerLng, latitudeDelta: deltaLat, longitudeDelta: deltaLng });
+      }
+    }
+  });
 
+  return () => unsubscribe();
+}, [currentRideId, selectedDriver, pickup]);
   const calculateEta = (driverLoc, pickupLoc) => {
     if (!driverLoc || !pickupLoc) return '--';
     const distanceKm = haversine(driverLoc, pickupLoc) / 1000;
     const etaMinutes = Math.round((distanceKm / 40) * 60); // 40 km/h average speed
     return etaMinutes < 1 ? '<1' : etaMinutes;
+  };
+
+  const cancelCurrentRide = async () => {
+    if (!currentRideId) return;
+    
+    try {
+      await setDoc(doc(db, 'rides', currentRideId), {
+        status: 'cancelled',
+        cancelledAt: serverTimestamp(),
+        cancelledBy: 'user'
+      }, { merge: true });
+      
+      setHasActiveRide(false);
+      setCurrentRideId(null);
+      setActiveRideId(null);
+      setRideStatus(null);
+      Alert.alert('Ride Cancelled', 'Your ride has been cancelled successfully.');
+    } catch (error) {
+      console.error('Error cancelling ride:', error);
+      Alert.alert('Error', 'Could not cancel ride. Please try again.');
+    }
   };
 
   const bookRide = async (rideId, driverId, pickup, dropoff) => {
@@ -161,6 +252,9 @@ export default function TravelDetailsScreen() {
         travelTime: travelTime,
         createdAt: serverTimestamp()
       });
+
+      setHasActiveRide(true);
+      setActiveRideId(rideId);
 
       // Create chat document
       await setDoc(doc(db, 'chats', rideId), {
@@ -257,11 +351,41 @@ export default function TravelDetailsScreen() {
     }
   };
 
-  const fetchNearbyDrivers = async () => {
+const fetchNearbyDrivers = async () => {
+  if (hasActiveRide && rideStatus !== 'cancelled_by_driver') {
+    Alert.alert(
+      'Active Ride Exists',
+      'You already have an active ride. Please complete or cancel your current ride before booking a new one.',
+      [
+        {
+          text: 'View Ride',
+          onPress: () => navigation.navigate('RideTracking', { rideId: activeRideId })
+        },
+        {
+          text: 'Cancel Ride',
+          onPress: cancelCurrentRide,
+          style: 'destructive'
+        },
+        {
+          text: 'OK',
+          style: 'cancel'
+        }
+      ]
+    );
+    return;
+  }
+
     if (!pickup) {
       Alert.alert('Pickup location not set');
       return;
     }
+     if (rideStatus === 'cancelled_by_driver') {
+    setHasActiveRide(false);
+    setActiveRideId(null);
+    setCurrentRideId(null);
+    setRideStatus(null);
+  }
+    
     setFetchingDrivers(true);
     try {
       const driversRef = collection(db, 'drivers');
@@ -558,27 +682,50 @@ export default function TravelDetailsScreen() {
   );
 
   const onConfirmOrder = async () => {
-    if (!pickup || !dropoff) {
-      Alert.alert('Missing Details', 'Please set both pickup and dropoff locations');
-      return;
-    }
+  if (hasActiveRide && rideStatus !== 'cancelled_by_driver') {
+    Alert.alert(
+      'Active Ride Exists',
+      'You already have an active ride. Please complete or cancel your current ride before booking a new one.',
+      [
+        {
+          text: 'View Ride',
+          onPress: () => navigation.navigate('RideTracking', { rideId: activeRideId })
+        },
+        {
+          text: 'Cancel Ride',
+          onPress: cancelCurrentRide,
+          style: 'destructive'
+        },
+        {
+          text: 'OK',
+          style: 'cancel'
+        }
+      ]
+    );
+    return;
+  }
 
-    if (!paymentDone) {
-      Alert.alert(
-        'Payment Required',
-        'Please select a payment method before confirming your order.',
-        [
-          {
-            text: 'OK',
-            onPress: () => setPaymentModalVisible(true),
-          },
-        ]
-      );
-      return;
-    }
+  if (!pickup || !dropoff) {
+    Alert.alert('Missing Details', 'Please set both pickup and dropoff locations');
+    return;
+  }
 
-    await fetchNearbyDrivers();
-  };
+  if (!paymentDone) {
+    Alert.alert(
+      'Payment Required',
+      'Please select a payment method before confirming your order.',
+      [
+        {
+          text: 'OK',
+          onPress: () => setPaymentModalVisible(true),
+        },
+      ]
+    );
+    return;
+  }
+
+  await fetchNearbyDrivers();
+};
 
   const renderDriverItem = ({ item }) => {
     const isSelected = selectedDriver?.id === item.id;
@@ -756,12 +903,20 @@ export default function TravelDetailsScreen() {
             <Text style={styles.trackingEta}>
               ETA: {trackingEta || '--'} min
             </Text>
-            <TouchableOpacity 
-              style={styles.trackingButton}
-              onPress={() => navigation.navigate('RideTracking', { rideId: currentRideId })}
-            >
-              <Text style={styles.trackingButtonText}>Live Tracking</Text>
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row' }}>
+              <TouchableOpacity 
+                style={[styles.trackingButton, { backgroundColor: '#ff4444', marginRight: 10 }]}
+                onPress={cancelCurrentRide}
+              >
+                <Text style={styles.trackingButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity 
+                style={styles.trackingButton}
+                onPress={() => navigation.navigate('RideTracking', { rideId: currentRideId })}
+              >
+                <Text style={styles.trackingButtonText}>Live Tracking</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       )}
@@ -882,26 +1037,38 @@ export default function TravelDetailsScreen() {
                   <Text style={styles.paymentButtonText}>Payment</Text>
                   <Ionicons name="chevron-forward" size={24} color="#FFA500" />
                 </TouchableOpacity>
-
-                {paymentDone && (
-                  <TouchableOpacity
-                    style={[styles.paymentButton, { marginTop: 10, backgroundColor: '#FFA500' }]}
-                    onPress={onConfirmOrder}
-                    disabled={fetchingDrivers}
-                  >
-                    {fetchingDrivers ? (
-                      <ActivityIndicator color="#fff" />
-                    ) : (
-                      <>
-                        <MaterialIcons name="check-circle" size={24} color="#fff" />
-                        <Text style={[styles.paymentButtonText, { color: '#fff' }]}>
-                          Confirm Order
-                        </Text>
-                        <Ionicons name="chevron-forward" size={24} color="#fff" />
-                      </>
-                    )}
-                  </TouchableOpacity>
-                )}
+{paymentDone && (
+  <TouchableOpacity
+    style={[
+      styles.paymentButton, 
+      { 
+        marginTop: 10,
+        backgroundColor: hasActiveRide ? '#ccc' : '#FFA500',
+        opacity: hasActiveRide ? 0.7 : 1
+      }
+    ]}
+    onPress={onConfirmOrder}
+    disabled={fetchingDrivers || hasActiveRide}
+  >
+    {fetchingDrivers ? (
+      <ActivityIndicator color="#fff" />
+    ) : (
+      <>
+        <MaterialIcons 
+          name={hasActiveRide ? "error-outline" : "check-circle"} 
+          size={24} 
+          color="#fff" 
+        />
+        <Text style={[styles.paymentButtonText, { color: '#fff' }]}>
+          {hasActiveRide ? 'Active Ride Exists' : 'Confirm Order'}
+        </Text>
+        {!hasActiveRide && (
+          <Ionicons name="chevron-forward" size={24} color="#fff" />
+        )}
+      </>
+    )}
+  </TouchableOpacity>
+)}
               </>
             }
             contentContainerStyle={{ paddingBottom: 30 }}
@@ -1356,4 +1523,4 @@ const createStyles = (darkMode) =>
       transform: [{ rotate: '180deg' }],
       marginTop: -5,
     },
-  });
+ });

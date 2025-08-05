@@ -5,7 +5,7 @@ import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import Toast from 'react-native-toast-message';
 import * as Notifications from 'expo-notifications';
-import { Platform, Alert, View, Text, TouchableOpacity } from 'react-native';
+import { Platform, Alert, View, Text, StyleSheet } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { ThemeProvider } from './ThemeContext';
 import { doc, getDoc, onSnapshot } from 'firebase/firestore';
@@ -94,12 +94,19 @@ export default function App() {
   useEffect(() => {
     const setupNotifications = async () => {
       try {
+        // Request permissions
+        const { status } = await Notifications.requestPermissionsAsync();
+        if (status !== 'granted') {
+          Alert.alert('Permission required', 'Notifications require permissions');
+          return;
+        }
+
         // Configure notification presentation
         await Notifications.setNotificationHandler({
           handleNotification: async () => ({
             shouldShowAlert: true,
-            shouldPlaySound: false,
-            shouldSetBadge: false,
+            shouldPlaySound: true,
+            shouldSetBadge: true,
           }),
         });
 
@@ -136,99 +143,54 @@ export default function App() {
     };
 
     const fetchRideListener = async () => {
-      const userData = (await getDoc(userRef)).data();
-      const rideId = userData?.currentRideId;
-      if (!rideId) return;
+      try {
+        const userData = (await getDoc(userRef)).data();
+        const rideId = userData?.currentRideId;
+        if (!rideId) return;
 
-      const rideRef = doc(db, 'rides', rideId);
-      unsubscribeRide = onSnapshot(rideRef, async (docSnapshot) => {
-        const data = docSnapshot.data();
-        if (!data?.status) return;
+        const rideRef = doc(db, 'rides', rideId);
+        unsubscribeRide = onSnapshot(rideRef, async (docSnapshot) => {
+          const data = docSnapshot.data();
+          if (!data?.status) return;
 
-        const [title, body] = statusMessages[data.status] || [];
-        if (!title) return;
+          const [title, body] = statusMessages[data.status] || [];
+          if (!title) return;
 
-        // Show toast
-        Toast.show({
-          type: 'info',
-          text1: title,
-          text2: body,
-          position: 'top',
-        });
+          // Show toast
+          Toast.show({
+            type: 'info',
+            text1: title,
+            text2: body,
+            position: 'top',
+          });
 
-        // Trigger in-app notification
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title,
-            body,
-            data: { 
-              rideId,
-              status: data.status,
-              timestamp: new Date().toISOString() 
+          // Trigger in-app notification
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title,
+              body,
+              data: { 
+                rideId,
+                status: data.status,
+                timestamp: new Date().toISOString(),
+                type: 'ride_update'
+              },
+              sound: true,
+              _displayInForeground: true,
             },
-            _displayInForeground: true,
-          },
-          trigger: null,
-        });
+            trigger: null,
+          });
 
-        setNotificationCount(prev => prev + 1);
-      });
+          setNotificationCount(prev => prev + 1);
+        });
+      } catch (error) {
+        console.error("Ride listener error:", error);
+      }
     };
 
     fetchRideListener();
     return () => unsubscribeRide?.();
   }, []);
-
-  // Test Notification Button Component
-  const TestNotificationButton = () => {
-    const [testResult, setTestResult] = useState(null);
-
-    const triggerTest = async () => {
-      try {
-        await Notifications.scheduleNotificationAsync({
-          content: {
-            title: "Test Notification",
-            body: "This is a successful test notification",
-            data: { test: true, timestamp: Date.now() },
-            _displayInForeground: true,
-          },
-          trigger: null,
-        });
-        setTestResult({ success: true, message: "Test notification sent!" });
-        setNotificationCount(prev => prev + 1);
-      } catch (error) {
-        setTestResult({ success: false, message: error.message });
-      }
-    };
-
-    return (
-      <View style={{ position: 'absolute', bottom: 20, right: 20, zIndex: 100 }}>
-        {testResult && (
-          <View style={{
-            backgroundColor: testResult.success ? '#4CAF50' : '#F44336',
-            padding: 10,
-            borderRadius: 5,
-            marginBottom: 10,
-          }}>
-            <Text style={{ color: 'white' }}>{testResult.message}</Text>
-          </View>
-        )}
-        <TouchableOpacity
-          style={{
-            backgroundColor: '#007bff',
-            padding: 15,
-            borderRadius: 30,
-            flexDirection: 'row',
-            alignItems: 'center',
-          }}
-          onPress={triggerTest}
-        >
-          <MaterialIcons name="notifications" size={24} color="white" />
-          <Text style={{ color: 'white', marginLeft: 10 }}>Test</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  };
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -284,7 +246,6 @@ export default function App() {
           </Stack.Navigator>
           
           <Toast />
-          <TestNotificationButton />
         </NavigationContainer>
       </ThemeProvider>
     </GestureHandlerRootView>

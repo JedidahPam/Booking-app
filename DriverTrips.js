@@ -38,36 +38,47 @@ export default function DriverTrips({ navigation }) {
   const mapRef = useRef(null);
 
   // Fetch directions from OpenRouteService API
-  const fetchDirections = async (startLoc, endLoc) => {
-    try {
-      const apiUrl = `https://api.openrouteservice.org/v2/directions/driving-car?api_key=${OPENROUTE_API_KEY}&start=${startLoc.longitude},${startLoc.latitude}&end=${endLoc.longitude},${endLoc.latitude}`;
-      
-      const response = await fetch(apiUrl, {
-        method: 'GET',
-        headers: {
-          'Accept': 'application/json, application/geo+json, application/gpx+xml, img/png; charset=utf-8',
-        }
-      });
-      
-      const json = await response.json();
-      
-      if (json.routes && json.routes.length > 0) {
-        const points = json.routes[0].geometry;
-        const decodedPoints = polyline.decode(points);
-        const coordinates = decodedPoints.map(point => ({
-          latitude: point[0],
-          longitude: point[1],
-        }));
-        setRouteCoordinates(coordinates);
-        return coordinates;
-      }
-      return [];
-    } catch (error) {
-      console.error('Error fetching directions:', error);
+// Replace the existing fetchDirections function with this:
+const fetchDirections = async (startLoc, endLoc) => {
+  try {
+    const url = 'https://api.openrouteservice.org/v2/directions/driving-car';
+    const body = { 
+      coordinates: [
+        [startLoc.longitude, startLoc.latitude],
+        [endLoc.longitude, endLoc.latitude]
+      ] 
+    };
+    
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: OPENROUTE_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    
+    const data = await response.json();
+    
+    if (!data.routes?.length) {
+      console.error('No route found in response:', data);
       return [];
     }
-  };
 
+    const geometry = data.routes[0].geometry;
+    const decoded = polyline.decode(geometry).map(([lat, lng]) => ({
+      latitude: lat,
+      longitude: lng,
+    }));
+    
+    setRouteCoordinates(decoded);
+    return decoded;
+  } catch (error) {
+    console.error('Error fetching directions:', error);
+    Alert.alert('Error', 'Failed to fetch route directions');
+    return [];
+  }
+};
   useEffect(() => {
     if (expandedMapVisible) {
       (async () => {
@@ -316,11 +327,12 @@ export default function DriverTrips({ navigation }) {
 
     const distanceToDropoff = haversine(coords, dropoff);
 
-    if (distanceToDropoff > 50) {
+    if (distanceToDropoff > 100) {
       Alert.alert(
         'Too Far From Dropoff',
         `You must be within 50 meters of the dropoff location to complete the trip. You're currently ${Math.round(distanceToDropoff)} meters away.`
       );
+      
       return;
     }
 
@@ -617,32 +629,38 @@ export default function DriverTrips({ navigation }) {
             </View>
           </View>
 
-          {expandedMapPickup && expandedMapDropoff && (
-            <MapView
-              ref={mapRef}
-              style={styles.expandedMap}
-              initialRegion={getExpandedMapRegion()}
-              showsUserLocation={true}
-              showsMyLocationButton={false}
-              followsUserLocation={true}
-            >
-              <Marker coordinate={expandedMapPickup} title="Pickup Location" pinColor="green" />
-              <Marker coordinate={expandedMapDropoff} title="Dropoff Location" pinColor="red" />
-              {driverLocation && (
-                <Marker coordinate={driverLocation} title="Your Location" pinColor="blue" />
-              )}
-              {routeCoordinates.length > 0 && (
-              <Polyline
+     {expandedMapPickup && expandedMapDropoff && (
+  <MapView
+    ref={mapRef}
+    style={styles.expandedMap}
+    initialRegion={getExpandedMapRegion()}
+    showsUserLocation={true}
+    showsMyLocationButton={false}
+    followsUserLocation={true}
+    onMapReady={() => {
+      if (routeCoordinates.length > 0) {
+        mapRef.current.fitToCoordinates(routeCoordinates, {
+          edgePadding: { top: 50, right: 50, bottom: 50, left: 50 },
+          animated: true,
+        });
+      }
+    }}
+  >
+    <Marker coordinate={expandedMapPickup} title="Pickup Location" pinColor="green" />
+    <Marker coordinate={expandedMapDropoff} title="Dropoff Location" pinColor="red" />
+    {driverLocation && (
+      <Marker coordinate={driverLocation} title="Your Location" pinColor="blue" />
+    )}
+    {routeCoordinates.length > 0 && (
+      <Polyline
   coordinates={routeCoordinates}
-  strokeColor="#3498db"
-  strokeWidth={5}
-  lineDashPattern={null} // Remove if you used it
-  zIndex={10} // Ensure it renders above base map
+  strokeColor="#00aaff"  // Changed to match TravelDetailsScreen
+  strokeWidth={4}
+  lineDashPattern={[1]}  // Optional: makes line dashed
 />
-
-              )}
-            </MapView>
-          )}
+    )}
+  </MapView>
+)}
         </SafeAreaView>
       </Modal>
     </SafeAreaView>

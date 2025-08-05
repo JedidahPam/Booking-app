@@ -13,8 +13,102 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { useTheme } from './ThemeContext';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
-import { auth } from './firebaseConfig';
-import { getDriverStatistics, getRecentRidesFromRidesCollection } from './driverStatsService';
+import { auth, db } from './firebaseConfig';
+import { collection, query, orderBy, limit, getDocs, where } from 'firebase/firestore';
+
+// Function to calculate statistics from rides
+async function getDriverStatistics(driverId) {
+  try {
+    const ridesRef = collection(db, 'rides');
+    const q = query(
+      ridesRef,
+      where('acceptedBy', '==', driverId),
+      where('status', '==', 'completed')
+    );
+    
+    const querySnapshot = await getDocs(q);
+    
+    // Calculate statistics
+    let totalEarnings = 0;
+    const now = new Date();
+    const thisMonth = now.getMonth();
+    const thisYear = now.getFullYear();
+    let monthlyEarnings = 0;
+    
+    querySnapshot.forEach(doc => {
+      const ride = doc.data();
+      const price = parseFloat(ride.price) || 0;
+      totalEarnings += price;
+      
+      // Check if ride is from this month
+      const rideDate = ride.startTime?.toDate?.() || new Date();
+      if (rideDate.getMonth() === thisMonth && rideDate.getFullYear() === thisYear) {
+        monthlyEarnings += price;
+      }
+    });
+    
+    // Get all rides (completed and cancelled) for completion rate
+    const allRidesQuery = query(
+      ridesRef,
+      where('acceptedBy', '==', driverId),
+      where('status', 'in', ['completed', 'cancelled'])
+    );
+    const allRidesSnapshot = await getDocs(allRidesQuery);
+    const totalRides = allRidesSnapshot.size;
+    const completedRides = querySnapshot.size;
+    
+    const completionRate = totalRides > 0 
+      ? (completedRides / totalRides) * 100 
+      : 100; // Default to 100% if no rides
+    
+    return {
+      totalEarnings,
+      monthlyEarnings,
+      completedTrips: completedRides,
+      completionRate
+    };
+    
+  } catch (error) {
+    console.error("Error calculating statistics:", error);
+    return {
+      totalEarnings: 0,
+      monthlyEarnings: 0,
+      completedTrips: 0,
+      completionRate: 0
+    };
+  }
+}
+
+// Function to get recent rides
+async function getRecentRidesFromRidesCollection(driverId, limitRides = 15) {
+  try {
+    const ridesRef = collection(db, 'rides');
+    // First get all recent rides (without the acceptedBy filter)
+    const q = query(
+      ridesRef,
+      orderBy('startTime', 'desc'),
+      limit(50) // Get more than needed since we'll filter client-side
+    );
+    
+    const querySnapshot = await getDocs(q);
+
+    // Then filter for this driver client-side
+    const rides = querySnapshot.docs
+      .map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        startTime: doc.data().startTime?.toDate?.() || doc.data().startTime
+      }))
+      .filter(ride => ride.acceptedBy === driverId)
+      .slice(0, limitRides);
+
+    return rides;
+    
+  } catch (error) {
+    console.error("Error fetching recent rides:", error);
+    return [];
+  }
+}
 
 export default function EarningsDetail() {
   const { darkMode } = useTheme();
@@ -47,10 +141,12 @@ export default function EarningsDetail() {
         return;
       }
 
-      const driverStats = await getDriverStatistics(driverId);
+      const [driverStats, rides] = await Promise.all([
+        getDriverStatistics(driverId),
+        getRecentRidesFromRidesCollection(driverId, 15)
+      ]);
+      
       setStats(driverStats);
-
-      const rides = await getRecentRidesFromRidesCollection(driverId, 15);
       setRecentRides(rides);
 
     } catch (error) {
@@ -66,9 +162,13 @@ export default function EarningsDetail() {
   const formatDate = (timestamp) => {
     if (!timestamp) return 'N/A';
     const date = timestamp.toDate ? timestamp.toDate() : new Date(timestamp);
-    return date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) +
-           ' ' +
-           date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+    return date.toLocaleDateString('en-US', { 
+      month: 'short', 
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true 
+    });
   };
 
   const getStatusColor = (status) => {
@@ -79,24 +179,10 @@ export default function EarningsDetail() {
       case 'pending': return '#FFC107';
       default: return darkMode ? '#FFA500' : '#2196F3';
     }
-  };
+   };
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-          <Ionicons name="arrow-back" size={28} color={darkMode ? '#FFA500' : '#444'} />
-        </TouchableOpacity>
-        <Text style={styles.title}>Earnings Detail</Text>
-        <TouchableOpacity onPress={fetchEarningsData} style={styles.refreshButton} disabled={loading || refreshing}>
-          {(loading || refreshing) ? (
-            <ActivityIndicator size="small" color={darkMode ? '#FFA500' : '#444'} />
-          ) : (
-            <Ionicons name="refresh" size={24} color={darkMode ? '#FFA500' : '#444'} />
-          )}
-        </TouchableOpacity>
-      </View>
-
       {loading && !stats ? (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={darkMode ? '#FFA500' : '#007AFF'} />
@@ -113,6 +199,24 @@ export default function EarningsDetail() {
             />
           }
         >
+          <View style={styles.header}>
+            <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
+              <Ionicons name="arrow-back" size={28} color={darkMode ? '#FFA500' : '#444'} />
+            </TouchableOpacity>
+            <Text style={styles.title}>Earnings Detail</Text>
+            <TouchableOpacity 
+              onPress={fetchEarningsData} 
+              style={styles.refreshButton} 
+              disabled={loading || refreshing}
+            >
+              {(loading || refreshing) ? (
+                <ActivityIndicator size="small" color={darkMode ? '#FFA500' : '#444'} />
+              ) : (
+                <Ionicons name="refresh" size={24} color={darkMode ? '#FFA500' : '#444'} />
+              )}
+            </TouchableOpacity>
+          </View>
+
           <Text style={styles.sectionTitle}>Earnings Summary</Text>
 
           <View style={styles.summaryContainer}>
@@ -158,7 +262,7 @@ export default function EarningsDetail() {
               <View key={ride.id || index} style={styles.tripCard}>
                 <View style={styles.tripHeader}>
                   <View style={[styles.statusBadge, { backgroundColor: getStatusColor(ride.status) }]}>
-                    <Text style={styles.statusText}>{ride.status?.toUpperCase() || 'UNKNOWN'}</Text>
+                    <Text style={styles.statusText}>{ride.status?.replace(/_/g, ' ')?.toUpperCase() || 'UNKNOWN'}</Text>
                   </View>
                   <Text style={styles.tripDate}>{formatDate(ride.startTime)}</Text>
                 </View>
@@ -180,7 +284,7 @@ export default function EarningsDetail() {
 
                 <View style={styles.tripFooter}>
                   <View style={styles.tripMetrics}>
-                    {ride.distance !== undefined && ride.distance !== null && !isNaN(ride.distance) && (
+                    {ride.distance !== undefined && !isNaN(ride.distance) && (
                       <Text style={styles.tripMetric}>
                         <Ionicons name="speedometer-outline" size={14} /> {ride.distance.toFixed(1)} km
                       </Text>
@@ -188,11 +292,7 @@ export default function EarningsDetail() {
                   </View>
 
                   {ride.status === 'completed' && (
-                    <Text style={styles.tripEarning}>+{(ride.price?.toFixed(2) || '0.00')}</Text>
-                  )}
-
-                  {ride.status === 'cancelled' && (
-                    <Text style={styles.tripCancelled}>Cancelled</Text>
+                    <Text style={styles.tripEarning}>+${ride.price?.toFixed(2) || '0.00'}</Text>
                   )}
                 </View>
               </View>
@@ -226,8 +326,6 @@ export default function EarningsDetail() {
   );
 }
 
-
-
 const createStyles = (darkMode) =>
   StyleSheet.create({
     container: {
@@ -235,14 +333,12 @@ const createStyles = (darkMode) =>
       backgroundColor: darkMode ? '#121212' : '#fff',
     },
     header: {
-      height: 56,
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
-      paddingHorizontal: 16,
-      borderBottomWidth: 1,
-      borderBottomColor: darkMode ? '#333' : '#ddd',
-      backgroundColor: darkMode ? '#1a1a1a' : '#f9f9f9',
+      paddingHorizontal: 20,
+      paddingTop: 15,
+      paddingBottom: 15,
     },
     backButton: {
       padding: 4,
@@ -263,8 +359,6 @@ const createStyles = (darkMode) =>
     },
     content: {
       flex: 1,
-      paddingHorizontal: 20,
-      paddingTop: 20,
     },
     loadingContainer: {
       flex: 1,
@@ -281,11 +375,13 @@ const createStyles = (darkMode) =>
       fontWeight: '700',
       color: darkMode ? '#FFA500' : '#007AFF',
       marginBottom: 15,
+      paddingHorizontal: 20,
     },
     summaryContainer: {
       flexDirection: 'row',
       justifyContent: 'space-between',
       marginBottom: 20,
+      paddingHorizontal: 20,
     },
     summaryCard: {
       flex: 1,
@@ -316,6 +412,7 @@ const createStyles = (darkMode) =>
     statsRow: {
       flexDirection: 'row',
       justifyContent: 'space-between',
+      paddingHorizontal: 20,
     },
     statItem: {
       flex: 1,
@@ -341,6 +438,7 @@ const createStyles = (darkMode) =>
     emptyState: {
       alignItems: 'center',
       paddingVertical: 60,
+      paddingHorizontal: 20,
     },
     emptyText: {
       fontSize: 18,
@@ -358,6 +456,7 @@ const createStyles = (darkMode) =>
       borderRadius: 12,
       padding: 15,
       marginBottom: 12,
+      marginHorizontal: 20,
       borderWidth: 1,
       borderColor: darkMode ? '#444' : '#e0e0e0',
       shadowColor: darkMode ? '#000' : '#aaa',
@@ -424,12 +523,11 @@ const createStyles = (darkMode) =>
       fontWeight: '600',
       color: '#F44336',
     },
-    // Styles for the custom modal
     centeredView: {
       flex: 1,
       justifyContent: 'center',
       alignItems: 'center',
-      backgroundColor: 'rgba(0,0,0,0.5)', // Dim background
+      backgroundColor: 'rgba(0,0,0,0.5)',
     },
     modalView: {
       margin: 20,
@@ -451,7 +549,7 @@ const createStyles = (darkMode) =>
       textAlign: 'center',
       fontSize: 20,
       fontWeight: 'bold',
-      color: darkMode ? '#FFA500' : '#E53935', // Red for error title
+      color: darkMode ? '#FFA500' : '#E53935',
     },
     modalText: {
       marginBottom: 20,
