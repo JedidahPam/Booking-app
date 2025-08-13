@@ -30,6 +30,8 @@ import {
   where,
 } from 'firebase/firestore';
 import moment from 'moment';
+import { AppState } from 'react-native';
+import { updateUserOnlineStatus } from './userStatusService';
 
 const ChatScreen = ({ route, navigation }) => {
   const { rideId, userId, driverId } = route.params;
@@ -124,6 +126,23 @@ const ChatScreen = ({ route, navigation }) => {
       setFilteredMessages(filtered);
     }
   }, [searchQuery, messages]);
+
+  useEffect(() => {
+  // Track when the app goes to background/foreground (for mobile)
+  const subscription = AppState.addEventListener('change', async (nextAppState) => {
+    if (nextAppState.match(/inactive|background/)) {
+      await updateUserOnlineStatus(currentUserId, false);
+    } else if (nextAppState === 'active') {
+      await updateUserOnlineStatus(currentUserId, true);
+    }
+  });
+
+  return () => {
+    subscription.remove();
+    // Update status to offline when component unmounts (if you want)
+    // updateUserOnlineStatus(currentUserId, false);
+  };
+}, [currentUserId]);
 
   const markMessagesAsRead = async (msgs) => {
     const unreadMessages = msgs.filter(
@@ -256,7 +275,7 @@ const ChatScreen = ({ route, navigation }) => {
   const renderHeader = () => (
     <View style={styles.chatHeader}>
       <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-        <Ionicons name="arrow-back" size={24} color="#fff" />
+        <Ionicons name="arrow-back" size={24} color="#FFA500" />
       </TouchableOpacity>
       
       <View style={styles.headerInfo}>
@@ -492,8 +511,8 @@ const styles = StyleSheet.create({
   headerInfo: {
     flex: 1,
   },
-  headerName: {
-    color: '#fff',
+headerName: {
+    color: '#FFA500', // Changed to orange
     fontSize: 18,
     fontWeight: 'bold',
   },
@@ -568,7 +587,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#333',
   },
   userBubble: {
-    backgroundColor: '#4a90e2',
+    backgroundColor:'#FFA500',
   },
   driverBubble: {
     backgroundColor: '#444',
@@ -623,8 +642,8 @@ const styles = StyleSheet.create({
     maxHeight: 100,
     fontSize: 16,
   },
-  sendButton: {
-    backgroundColor: '#4a90e2',
+sendButton: {
+    backgroundColor: '#FFA500', // Changed to orange
     width: 44,
     height: 44,
     borderRadius: 22,

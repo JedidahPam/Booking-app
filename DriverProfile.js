@@ -39,40 +39,41 @@ export default function DriverProfile() {
   });
 
   // Fetch driver profile using Firebase SDK
-  const fetchProfile = async () => {
-    if (!userId) return;
-    setLoading(true);
-    try {
-      const docRef = doc(db, 'drivers', userId);
-      const docSnap = await getDoc(docRef);
-      
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        const firstname = data.firstname || '';
-        const lastname = data.lastname || '';
-        
-        setProfile({
-          fullName: `${firstname} ${lastname}`.trim(),
-          email: data.email || auth.currentUser.email || '',
-          phone: data.phone || '',
-          vehicleMake: data.vehicleInfo?.make || '',
-          vehicleModel: data.vehicleInfo?.model || '',
-          vehiclePlate: data.vehicleInfo?.plateNumber || '',
-          licenseNumber: data.licenseNumber || '',
-          licenseExpiry: data.licenseExpiry || '',
-          profilePicUrl: data.profilePicUrl || '',
-        });
-      } else {
-        // Document doesn't exist, create default profile
-        await createDefaultProfile();
-      }
-    } catch (error) {
-      console.error('Fetch profile error:', error);
-      Alert.alert('Error', 'Failed to load profile data.');
-    } finally {
-      setLoading(false);
-    }
-  };
+const fetchProfile = async () => {
+  if (!userId) return;
+  setLoading(true);
+  
+  try {
+    // Fetch from BOTH collections
+    const [userDoc, driverDoc] = await Promise.all([
+      getDoc(doc(db, 'users', userId)),
+      getDoc(doc(db, 'drivers', userId))
+    ]);
+
+    // Merge data from both documents
+    const userData = userDoc.exists() ? userDoc.data() : {};
+    const driverData = driverDoc.exists() ? driverDoc.data() : {};
+
+    setProfile({
+      fullName: `${userData.firstname || ''} ${userData.lastname || ''}`.trim(),
+      email: userData.email || auth.currentUser?.email || '',
+      phone: userData.phone || '',
+      // Vehicle info comes from 'drivers' collection
+      vehicleMake: driverData.vehicleInfo?.make || '',
+      vehicleModel: driverData.vehicleInfo?.model || '',
+      vehiclePlate: driverData.vehicleInfo?.plateNumber || '',
+      licenseNumber: driverData.licenseNumber || '',
+      licenseExpiry: driverData.licenseExpiry || '',
+      profilePicUrl: driverData.profilePicUrl || '',
+    });
+
+  } catch (error) {
+    console.error('Fetch error:', error);
+    Alert.alert('Error', 'Failed to load profile data');
+  } finally {
+    setLoading(false);
+  }
+};
 
   // Create default empty profile doc for new driver
   const createDefaultProfile = async () => {
@@ -123,41 +124,41 @@ export default function DriverProfile() {
   };
 
   // Save profile using Firebase SDK
-  const saveProfile = async () => {
-    if (!userId) return;
-    setSaving(true);
-    try {
-      // Split fullName into firstname and lastname
-      const nameParts = profile.fullName.trim().split(' ');
-      const firstname = nameParts.shift() || '';
-      const lastname = nameParts.join(' ') || '';
+const saveProfile = async () => {
+  if (!userId) return;
+  setSaving(true);
 
-      const docRef = doc(db, 'drivers', userId);
-      const updateData = {
-        firstname,
-        lastname,
-        email: profile.email,
+  try {
+    // Update BOTH collections
+    await Promise.all([
+      // Update personal info in 'users'
+      updateDoc(doc(db, 'users', userId), {
         phone: profile.phone,
-        licenseNumber: profile.licenseNumber,
-        licenseExpiry: profile.licenseExpiry,
-        profilePicUrl: profile.profilePicUrl,
+        updatedAt: new Date(),
+      }),
+      
+      // Update driver info in 'drivers'
+      updateDoc(doc(db, 'drivers', userId), {
         vehicleInfo: {
           make: profile.vehicleMake,
           model: profile.vehicleModel,
           plateNumber: profile.vehiclePlate,
         },
+        licenseNumber: profile.licenseNumber,
+        licenseExpiry: profile.licenseExpiry,
+        profilePicUrl: profile.profilePicUrl,
         updatedAt: new Date(),
-      };
+      }),
+    ]);
 
-      await updateDoc(docRef, updateData);
-      Alert.alert('Success', 'Profile saved!');
-    } catch (error) {
-      console.error('Save failed:', error);
-      Alert.alert('Error', 'Failed to save profile.');
-    } finally {
-      setSaving(false);
-    }
-  };
+    Alert.alert('Success', 'Profile saved!');
+  } catch (error) {
+    console.error('Save error:', error);
+    Alert.alert('Error', 'Failed to save profile');
+  } finally {
+    setSaving(false);
+  }
+};
 
   // Image picker & upload logic (unchanged)
   const pickImage = async () => {
@@ -315,7 +316,7 @@ const createStyles = (darkMode) =>
       fontSize: 26,
       fontWeight: '700',
       marginBottom: 20,
-      color: darkMode ? '#FFA500' : '#007bff',
+      color: "#FFA500", // Changed to orange
       textAlign: 'center',
     },
     imageContainer: {
@@ -324,7 +325,7 @@ const createStyles = (darkMode) =>
       borderRadius: 60,
       overflow: 'hidden',
       borderWidth: 2,
-      borderColor: darkMode ? '#FFA500' : '#007bff',
+      borderColor: "#FFA500", // Changed to orange
     },
     profileImage: {
       width: 120,
@@ -343,7 +344,7 @@ const createStyles = (darkMode) =>
       color: darkMode ? '#aaa' : '#666',
     },
     label: {
-      color: darkMode ? '#FFA500' : '#007bff',
+      color: "#FFA500", // Changed to orange
       fontWeight: '600',
       marginBottom: 6,
     },
@@ -361,19 +362,19 @@ const createStyles = (darkMode) =>
       color: darkMode ? '#aaa' : '#888',
     },
     sectionHeader: {
-      color: darkMode ? '#FFA500' : '#007bff',
+      color: "#FFA500", // Changed to orange
       fontSize: 20,
       fontWeight: '700',
       marginTop: 30,
       marginBottom: 12,
     },
     saveButton: {
-      backgroundColor: darkMode ? '#FFA500' : '#007bff',
+      backgroundColor: "#FFA500", // Changed to orange
       paddingVertical: 14,
       borderRadius: 12,
       marginTop: 30,
       alignItems: 'center',
-      shadowColor: darkMode ? '#ffa500' : '#007bff',
+      shadowColor: "#FFA500", // Changed to orange
       shadowOffset: { width: 0, height: 3 },
       shadowOpacity: 0.8,
       shadowRadius: 5,

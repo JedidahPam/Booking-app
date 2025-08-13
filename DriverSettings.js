@@ -1,4 +1,3 @@
-// DriverSettings.js - Updated Version without Statistics
 import React, { useEffect, useState } from 'react';
 import {
   View,
@@ -61,7 +60,7 @@ export default function DriverSettings() {
           style={styles.backButton}
           accessibilityRole="button"
         >
-          <Ionicons name="arrow-back" size={28} color={darkMode ? '#FFA500' : '#444'} />
+          <Ionicons name="arrow-back" size={28} color="#FFA500" />
         </TouchableOpacity>
         <Text style={styles.title}>Settings</Text>
         <View style={styles.refreshButton} />
@@ -76,8 +75,8 @@ export default function DriverSettings() {
           <Switch
             value={darkMode}
             onValueChange={toggleDarkMode}
-            thumbColor={darkMode ? '#FFA500' : '#f4f3f4'}
-            trackColor={{ false: '#767577', true: '#7a42f4' }}
+            thumbColor="#FFA500"
+            trackColor={{ false: '#767577', true: '#FFA500' }}
           />
         </View>
 
@@ -91,7 +90,7 @@ export default function DriverSettings() {
           <Ionicons
             name="chevron-forward"
             size={22}
-            color={darkMode ? '#FFA500' : '#444'}
+            color="#FFA500"
           />
         </TouchableOpacity>
 
@@ -105,7 +104,7 @@ export default function DriverSettings() {
           <Ionicons
             name="analytics-outline"
             size={22}
-            color={darkMode ? '#FFA500' : '#444'}
+            color="#FFA500"
           />
         </TouchableOpacity>
 
@@ -153,7 +152,7 @@ const createStyles = (darkMode) =>
     title: {
       fontSize: 20,
       fontWeight: 'bold',
-      color: darkMode ? '#FFA500' : '#222',
+      color: "#FFA500",
     },
     content: {
       flex: 1,
@@ -163,7 +162,7 @@ const createStyles = (darkMode) =>
     sectionTitle: {
       fontSize: 18,
       fontWeight: '700',
-      color: darkMode ? '#FFA500' : '#007AFF',
+      color: "#FFA500",
       marginBottom: 12,
       letterSpacing: 0.5,
     },

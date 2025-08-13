@@ -22,15 +22,16 @@ import { useNavigation, useRoute } from '@react-navigation/native';
 import * as Location from 'expo-location';
 import polyline from '@mapbox/polyline';
 import SettingsPanel from './SettingsPanel';
-import SettingsScreen from './SettingsScreen';
+import SettingsScreen from './SettingsScreen'; 
 import { useTheme } from './ThemeContext';
-import { collection, query, where, getDocs, doc, getDoc, addDoc, setDoc, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, getDoc, addDoc, setDoc, onSnapshot, arrayUnion, limit, orderBy } from 'firebase/firestore';
 import { db, auth } from './firebaseConfig';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import haversine from 'haversine-distance';
 import { serverTimestamp } from 'firebase/firestore';
 import { Modalize } from 'react-native-modalize';
+
 
 const OPENCAGE_API_KEY = 'a87b854ab508451da44974719031b90b';
 const OPENROUTESERVICE_API_KEY = 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjllZjJjN2YyMTI1NTQ1YWI5NzJhZmYxMjBmNjhkMTg5IiwiaCI6Im11cm11cjY0In0=';
@@ -66,6 +67,8 @@ export default function TravelDetailsScreen() {
   const modalizeRef = useRef(null);
   const [hasActiveRide, setHasActiveRide] = useState(false);
   const [activeRideId, setActiveRideId] = useState(null);
+  const [needsReassignment, setNeedsReassignment] = useState(false);
+
   
   // Driver tracking states
   const [rideStatus, setRideStatus] = useState(null);
@@ -86,58 +89,76 @@ export default function TravelDetailsScreen() {
   const dropoffInputRef = useRef(null);
 
   // Check for active rides when component mounts
- useEffect(() => {
+useEffect(() => {
   const checkActiveRides = async () => {
     if (!auth.currentUser) return;
     
     try {
       const ridesRef = collection(db, 'rides');
-      const q = query(
+      
+      // Check for non-cancelled rides
+      const activeRidesQuery = query(
         ridesRef,
         where('userId', '==', auth.currentUser.uid),
-        where('status', 'in', ['pending', 'accepted', 'in-progress', 'cancelled_by_driver'])
+        where('status', 'in', ['pending', 'accepted', 'in-progress'])
       );
       
-      const querySnapshot = await getDocs(q);
-      const hasActive = !querySnapshot.empty;
-      setHasActiveRide(hasActive);
+      const activeSnapshot = await getDocs(activeRidesQuery);
       
-      if (hasActive) {
-        const activeRide = querySnapshot.docs[0].data();
+      if (!activeSnapshot.empty) {
+        const activeRide = activeSnapshot.docs[0].data();
+        setHasActiveRide(true);
         setActiveRideId(activeRide.rideId);
         setCurrentRideId(activeRide.rideId);
         setRideStatus(activeRide.status);
+        return;
+      }
+
+      // Check for cancelled rides
+      const cancelledRidesQuery = query(
+        ridesRef,
+        where('userId', '==', auth.currentUser.uid),
+        where('status', 'in', ['cancelled_by_driver', 'declined']),
+        orderBy('updatedAt', 'desc'),
+        limit(1)
+      );
+      
+      const cancelledSnapshot = await getDocs(cancelledRidesQuery);
+      
+      if (!cancelledSnapshot.empty) {
+        const cancelledRide = cancelledSnapshot.docs[0].data();
         
-        // If ride was cancelled by driver, show appropriate message
-        if (activeRide.status === 'cancelled_by_driver') {
-          Alert.alert(
-            'Ride Cancelled', 
-            'The driver has cancelled your ride. Please book a new one.',
-            [
-              {
-                text: 'OK',
-                onPress: () => {
-                  // Reset ride status
-                  setHasActiveRide(false);
-                  setActiveRideId(null);
-                  setCurrentRideId(null);
-                  setRideStatus(null);
-                }
-              }
-            ]
-          );
-        }
+        // Update Firestore with previous driver and new status
+        await setDoc(doc(db, 'rides', cancelledRide.rideId), {
+          previousDrivers: arrayUnion(cancelledRide.driverId),
+          status: 'needs_reassignment',
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+
+        // Set ride details in state
+        setPickup(cancelledRide.pickup);
+        setDropoff(cancelledRide.dropoff);
+        setFromLocation(cancelledRide.pickup.address);
+        setToLocation(cancelledRide.dropoff.address);
+        setSelectedTransport(cancelledRide.transport);
+        setPrice(cancelledRide.price);
+        setDistance(cancelledRide.distance);
+        setTravelTime(cancelledRide.travelTime);
         
-        // If ride is in progress, set driver location
-        if (activeRide.status === 'in-progress' && activeRide.driverLocation) {
-          setDriverLocationUpdates(activeRide.driverLocation);
-        }
+        // Maintain ride ID and set reassignment state
+        setCurrentRideId(cancelledRide.rideId);
+        setActiveRideId(cancelledRide.rideId);
+        setHasActiveRide(true);
+        setRideStatus('needs_reassignment');
+
+        // Automatically fetch nearby drivers (excluding the previous one)
+        fetchNearbyDrivers(cancelledRide.driverId);
       }
     } catch (error) {
       console.error('Error checking active rides:', error);
     }
   };
-  
+
   checkActiveRides();
 }, []);
 
@@ -155,27 +176,85 @@ export default function TravelDetailsScreen() {
     }
   }, [selectedDriver]);
 
-  // Track driver location when ride is in progress
   useEffect(() => {
-  if (!currentRideId || !selectedDriver) return;
+  if (rideStatus === 'needs_reassignment') {
+    setNeedsReassignment(true);
+    fetchNearbyDrivers();
+  } else {
+    setNeedsReassignment(false);
+  }
+}, [rideStatus]);
+  
+useEffect(() => {
+  if (!currentRideId) return;
 
-  const unsubscribe = onSnapshot(doc(db, 'rides', currentRideId), (doc) => {
-    const rideData = doc.data();
-    setRideStatus(rideData.status);
+  const unsubscribe = onSnapshot(doc(db, 'rides', currentRideId), async (docSnapshot) => {
+    const rideData = docSnapshot.data();
+    if (!rideData) return;
     
-    // Update active ride status
-    if (['completed', 'cancelled', 'declined', 'cancelled_by_driver'].includes(rideData.status)) {
-      setHasActiveRide(false);
-      setActiveRideId(null);
+    const newStatus = rideData.status;
+    const previousStatus = rideStatus;
+    
+    console.log(`Ride status changed from ${previousStatus} to ${newStatus}`);
+    setRideStatus(newStatus);
+    
+    // Handle driver cancellation/decline
+    if ((newStatus === 'cancelled_by_driver' || newStatus === 'declined') && 
+        previousStatus !== 'cancelled_by_driver' && previousStatus !== 'declined') {
       
-      if (rideData.status === 'cancelled_by_driver') {
-        Alert.alert(
-          'Ride Cancelled', 
-          'The driver has cancelled your ride. Please book a new one.'
-        );
+      // Update previous drivers list
+      try {
+        const currentPreviousDrivers = rideData.previousDrivers || [];
+        if (rideData.driverId && !currentPreviousDrivers.includes(rideData.driverId)) {
+          const updatedPreviousDrivers = [...currentPreviousDrivers, rideData.driverId];
+          
+          await setDoc(doc(db, 'rides', currentRideId), {
+            previousDrivers: updatedPreviousDrivers,
+            status: 'needs_reassignment',
+            updatedAt: serverTimestamp()
+          }, { merge: true });
+        }
+      } catch (error) {
+        console.error('Error updating previousDrivers:', error);
       }
+      
+      // Show reassignment alert
+      Alert.alert(
+        'Driver Unavailable', 
+        `Your driver ${newStatus === 'cancelled_by_driver' ? 'cancelled' : 'declined'} the ride.`,
+        [
+          {
+            text: 'Cancel Ride',
+            style: 'destructive',
+            onPress: () => {
+              cancelCurrentRide();
+            }
+          },
+          {
+            text: 'Reassign Driver',
+            onPress: () => {
+              // Just update the status - don't fetch drivers yet
+              setRideStatus('needs_reassignment');
+              setNeedsReassignment(true);
+            }
+          }
+        ]
+      );
     }
 
+    // Handle other status changes
+    if (newStatus === 'completed' || newStatus === 'cancelled') {
+      // Complete cleanup on completion or cancellation
+      setHasActiveRide(false);
+      setActiveRideId(null);
+      setCurrentRideId(null);
+      setRideStatus(null);
+      setSelectedDriver(null);
+      setDriverLocationUpdates(null);
+      setNeedsReassignment(false);
+    }
+
+    // Handle driver location updates for in-progress rides
     if (rideData.status === 'in-progress' && rideData.driverLocation) {
       setDriverLocationUpdates(rideData.driverLocation);
       const eta = calculateEta(rideData.driverLocation, pickup);
@@ -193,132 +272,204 @@ export default function TravelDetailsScreen() {
   });
 
   return () => unsubscribe();
-}, [currentRideId, selectedDriver, pickup]);
-  const calculateEta = (driverLoc, pickupLoc) => {
-    if (!driverLoc || !pickupLoc) return '--';
-    const distanceKm = haversine(driverLoc, pickupLoc) / 1000;
-    const etaMinutes = Math.round((distanceKm / 40) * 60); // 40 km/h average speed
-    return etaMinutes < 1 ? '<1' : etaMinutes;
-  };
+}, [currentRideId, pickup, rideStatus]);
 
-  const cancelCurrentRide = async () => {
-    if (!currentRideId) return;
-    
-    try {
-      await setDoc(doc(db, 'rides', currentRideId), {
-        status: 'cancelled',
-        cancelledAt: serverTimestamp(),
-        cancelledBy: 'user'
-      }, { merge: true });
+// Also fix the cancelCurrentRide function:
+const cancelCurrentRide = async () => {
+  if (!currentRideId) return;
+  
+  Alert.alert(
+    'Cancel Ride',
+    'Are you sure you want to cancel this ride?',
+    [
+      { text: 'No', style: 'cancel' },
+      {
+        text: 'Yes, Cancel',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            // FIX: Use the correct doc reference
+            const rideDocRef = doc(db, 'rides', currentRideId);
+            await setDoc(rideDocRef, {
+              status: 'cancelled',
+              cancelledAt: serverTimestamp(),
+              cancelledBy: 'user',
+              updatedAt: serverTimestamp()
+            }, { merge: true });
+            
+            // Complete state reset
+            setHasActiveRide(false);
+            setCurrentRideId(null);
+            setActiveRideId(null);
+            setRideStatus(null);
+            setSelectedDriver(null);
+            setDriverLocationUpdates(null);
+            setTrackingEta(null);
+            setNeedsReassignment(false);
+            setDriversVisible(false);
+            
+            // Clear form
+            setPickup(null);
+            setDropoff(null);
+            setFromLocation('');
+            setToLocation('');
+            setPrice(null);
+            setDistance(null);
+            setTravelTime(null);
+            setRouteCoords([]);
+            
+            Alert.alert('Ride Cancelled', 'Your ride has been cancelled successfully.');
+          } catch (error) {
+            console.error('Error cancelling ride:', error);
+            Alert.alert('Error', 'Could not cancel ride. Please try again.');
+          }
+        }
+      }
+    ]
+  );
+};
+// Enhanced bookRide function with better previousDrivers tracking
+
+// 3. Enhanced bookRide function with better reassignment handling
+const bookRide = async (rideId, driverId, pickup, dropoff, isReassignment = false) => {
+  const userId = auth.currentUser.uid;
+
+  try {
+    const rideData = {
+      rideId,
+      userId,
+      driverId,
+      pickup: {
+        name: pickup.address,
+        latitude: pickup.latitude,
+        longitude: pickup.longitude,
+        address: pickup.address
+      },
+      dropoff: {
+        name: dropoff.address,
+        latitude: dropoff.latitude,
+        longitude: dropoff.longitude,
+        address: dropoff.address
+      },
+      price: parseFloat(price),
+      distance: parseFloat(distance),
+      transport: selectedTransport,
+      paymentMethod,
+      timestamp: serverTimestamp(),
+      travelTime: travelTime,
+      updatedAt: serverTimestamp(),
+    };
+
+    if (isReassignment) {
+      // Get existing ride data and update previousDrivers
+      const rideDoc = await getDoc(doc(db, 'rides', rideId));
+      let previousDrivers = [];
+      let originalTimestamp = null;
       
-      setHasActiveRide(false);
-      setCurrentRideId(null);
-      setActiveRideId(null);
-      setRideStatus(null);
-      Alert.alert('Ride Cancelled', 'Your ride has been cancelled successfully.');
-    } catch (error) {
-      console.error('Error cancelling ride:', error);
-      Alert.alert('Error', 'Could not cancel ride. Please try again.');
-    }
-  };
-
-  const bookRide = async (rideId, driverId, pickup, dropoff) => {
-    const userId = auth.currentUser.uid;
-
-    try {
-      // Create ride document
+      if (rideDoc.exists()) {
+        const existingData = rideDoc.data();
+        previousDrivers = existingData.previousDrivers || [];
+        originalTimestamp = existingData.timestamp || existingData.createdAt;
+        
+        // Ensure the previous driver is in the exclusion list
+        const previousDriverId = existingData.driverId;
+        if (previousDriverId && !previousDrivers.includes(previousDriverId)) {
+          previousDrivers.push(previousDriverId);
+        }
+      }
+      
+      // Update existing ride with new driver
       await setDoc(doc(db, 'rides', rideId), {
-        rideId,
-        userId,
-        driverId,
-        pickup: {
-          name: pickup.address,
-          latitude: pickup.latitude,
-          longitude: pickup.longitude,
-          address: pickup.address
-        },
-        dropoff: {
-          name: dropoff.address,
-          latitude: dropoff.latitude,
-          longitude: dropoff.longitude,
-          address: dropoff.address
-        },
-        price: parseFloat(price),
-        distance: parseFloat(distance),
-        transport: selectedTransport,
-        paymentMethod,
-        timestamp: serverTimestamp(),
+        ...rideData,
         status: 'pending',
-        travelTime: travelTime,
-        createdAt: serverTimestamp()
+        previousDrivers,
+        timestamp: originalTimestamp, // Keep original timestamp
+        createdAt: originalTimestamp, // Keep original creation time
+        reassignedAt: serverTimestamp(), // Add reassignment timestamp
+        reassignmentCount: (rideDoc.exists() ? (rideDoc.data().reassignmentCount || 0) + 1 : 1),
+        cancelledAt: null,
+        cancelledBy: null,
+        declinedAt: null,
+      }, { merge: true });
+
+      console.log(`Ride reassigned with ${previousDrivers.length} previous drivers excluded`);
+    } else {
+      // New ride
+      await setDoc(doc(db, 'rides', rideId), {
+        ...rideData,
+        status: 'pending',
+        createdAt: serverTimestamp(),
+        previousDrivers: [], // Initialize empty
+        reassignmentCount: 0,
       });
+    }
 
-      setHasActiveRide(true);
-      setActiveRideId(rideId);
+    // Update state
+    setHasActiveRide(true);
+    setActiveRideId(rideId);
+    setCurrentRideId(rideId);
+    setRideStatus('pending');
+    setNeedsReassignment(false);
 
-      // Create chat document
+    // Handle chat document
+    if (isReassignment) {
+      // Update chat with new driver
+      const chatDoc = await getDoc(doc(db, 'chats', rideId));
+      let chatPreviousDrivers = [];
+      
+      if (chatDoc.exists()) {
+        const chatData = chatDoc.data();
+        chatPreviousDrivers = chatData.previousDrivers || [];
+        if (chatData.driverId && !chatPreviousDrivers.includes(chatData.driverId)) {
+          chatPreviousDrivers.push(chatData.driverId);
+        }
+      }
+
+      await setDoc(doc(db, 'chats', rideId), {
+        driverId,
+        previousDrivers: chatPreviousDrivers,
+        updatedAt: serverTimestamp(),
+      }, { merge: true });
+
+      // Add reassignment message
+      await addDoc(collection(db, 'chats', rideId, 'messages'), {
+        senderId: userId,
+        text: `Hi! I've been reassigned to you as my new driver. Please confirm you can take this ride.`,
+        timestamp: serverTimestamp(),
+        messageType: 'reassignment',
+      });
+    } else {
+      // Create new chat document
       await setDoc(doc(db, 'chats', rideId), {
         rideId,
         userId,
         driverId,
+        previousDrivers: [],
+        createdAt: serverTimestamp(),
       });
 
-      // Add welcome message
+      // Add initial message
       await addDoc(collection(db, 'chats', rideId, 'messages'), {
         senderId: userId,
         text: 'Hi driver, I\'ve just booked the ride!',
         timestamp: serverTimestamp(),
+        messageType: 'booking',
       });
-
-      console.log('Ride and chat initialized successfully!');
-      return true;
-    } catch (error) {
-      console.error('Booking error:', error);
-      Alert.alert('Booking Failed', 'Please try again.');
-      return false;
     }
-  };
 
-  const saveRideToFirestore = async () => {
-    if (!auth.currentUser || !pickup || !dropoff || !price || !selectedTransport) return null;
-
-    try {
-      const rideId = doc(collection(db, 'rides')).id;
-      
-      const rideData = {
-        rideId,
-        userId: auth.currentUser.uid,
-        pickup: {
-          name: pickup.address,
-          latitude: pickup.latitude,
-          longitude: pickup.longitude,
-          address: pickup.address
-        },
-        dropoff: {
-          name: dropoff.address,
-          latitude: dropoff.latitude,
-          longitude: dropoff.longitude,
-          address: dropoff.address
-        },
-        price: parseFloat(price),
-        distance: parseFloat(distance),
-        transport: selectedTransport,
-        paymentMethod,
-        timestamp: serverTimestamp(),
-        status: 'pending',
-        travelTime: travelTime,
-        createdAt: serverTimestamp()
-      };
-
-      await setDoc(doc(db, 'rides', rideId), rideData);
-      console.log('Ride saved with ID:', rideId);
-      return rideId;
-    } catch (error) {
-      console.error('Error saving ride:', error);
-      Alert.alert('Error', 'Could not save ride to Firestore');
-      return null;
-    }
-  };
+    console.log(isReassignment ? 'Driver reassigned successfully!' : 'Ride booked successfully!');
+    return true;
+  } catch (error) {
+    console.error('Booking error:', error);
+    Alert.alert(
+      'Booking Failed', 
+      isReassignment 
+        ? 'Could not reassign driver. Please try again.' 
+        : 'Please try again.'
+    );
+    return false;
+  }
+};
 
   const fetchPricing = async () => {
     try {
@@ -350,153 +501,167 @@ export default function TravelDetailsScreen() {
       setLoading(false);
     }
   };
+// Update the fetchNearbyDrivers function - Fix active ride check
 
-const fetchNearbyDrivers = async () => {
-  if (hasActiveRide && rideStatus !== 'cancelled_by_driver') {
-    Alert.alert(
-      'Active Ride Exists',
-      'You already have an active ride. Please complete or cancel your current ride before booking a new one.',
-      [
-        {
-          text: 'View Ride',
-          onPress: () => navigation.navigate('RideTracking', { rideId: activeRideId })
-        },
-        {
-          text: 'Cancel Ride',
-          onPress: cancelCurrentRide,
-          style: 'destructive'
-        },
-        {
-          text: 'OK',
-          style: 'cancel'
-        }
-      ]
-    );
+// 2. Enhanced fetchNearbyDrivers function with better exclusion logic
+const fetchNearbyDrivers = async (excludeDriverId = null) => {
+  if (!pickup) {
+    Alert.alert('Error', 'Pickup location not set');
     return;
   }
 
-    if (!pickup) {
-      Alert.alert('Pickup location not set');
+  // Check if we're in reassignment mode
+  const isReassignment = rideStatus === 'needs_reassignment' || needsReassignment;
+  
+  // If not in reassignment mode, check for active rides
+  if (!isReassignment) {
+    const isActuallyActive = hasActiveRide && 
+                           currentRideId && 
+                           ['pending', 'accepted', 'in-progress'].includes(rideStatus);
+
+    if (isActuallyActive) {
+      Alert.alert(
+        'Active Ride Exists',
+        'Please complete or cancel your current ride before booking a new one.',
+        [
+          { text: 'View Ride', onPress: () => navigation.navigate('RideTracking', { rideId: currentRideId }) },
+          { text: 'Cancel Ride', onPress: cancelCurrentRide, style: 'destructive' },
+          { text: 'OK', style: 'cancel' }
+        ]
+      );
       return;
     }
-     if (rideStatus === 'cancelled_by_driver') {
-    setHasActiveRide(false);
-    setActiveRideId(null);
-    setCurrentRideId(null);
-    setRideStatus(null);
   }
-    
-    setFetchingDrivers(true);
-    try {
-      const driversRef = collection(db, 'drivers');
-      const querySnapshot = await getDocs(driversRef);
 
-      const driversFromFirestore = [];
-      for (const driverDoc of querySnapshot.docs) {
-        const driverData = driverDoc.data();
-        const driverId = driverDoc.id;
-        const vehicleInfo = driverData.vehicleInfo || {};
-        
-        const vehicleDetails = {
-          make: vehicleInfo.make || 'Unknown Make',
-          model: vehicleInfo.model || 'Unknown Model',
-          year: vehicleInfo.year || 'Unknown Year',
-          color: vehicleInfo.color || 'Unknown Color',
-          licensePlate: vehicleInfo.plateNumber || vehicleInfo.licensePlate || 'Unknown Plate',
-          vehicleType: vehicleInfo.vehicleType || 'car',
-          capacity: vehicleInfo.capacity || 4,
-          fuelType: vehicleInfo.fuelType || 'Unknown',
-        };
-
-        let driverPersonalInfo = {
-          firstname: 'Unknown',
-          lastname: 'Driver',
-          email: '',
-          phone: '',
-          profileImage: null,
-        };
-
-        if (driverId) {
-          try {
-            const userDocRef = doc(db, 'users', driverId);
-            const userDocSnap = await getDoc(userDocRef);
-            if (userDocSnap.exists()) {
-              const userData = userDocSnap.data();
-              driverPersonalInfo = {
-                firstname: userData.firstname || 'Unknown',
-                lastname: userData.lastname || 'Driver',
-                email: userData.email || '',
-                phone: userData.phone || '',
-                profileImage: userData.profileImage || userData.photoURL || null,
-              };
-            }
-          } catch (userError) {
-            console.error(`Error fetching user info for driver ${driverId}:`, userError);
+  setFetchingDrivers(true);
+  try {
+    // Get previous drivers list for exclusion
+    let previousDrivers = [];
+    if (currentRideId && isReassignment) {
+      try {
+        const rideDoc = await getDoc(doc(db, 'rides', currentRideId));
+        if (rideDoc.exists()) {
+          const rideData = rideDoc.data();
+          previousDrivers = rideData.previousDrivers || [];
+          
+          // Also exclude the current driver who just cancelled/declined
+          if (rideData.driverId && !previousDrivers.includes(rideData.driverId)) {
+            previousDrivers.push(rideData.driverId);
           }
         }
-
-        const driverInfo = {
-          id: driverId,
-          name: `${driverPersonalInfo.firstname} ${driverPersonalInfo.lastname}`.trim(),
-          firstname: driverPersonalInfo.firstname,
-          lastname: driverPersonalInfo.lastname,
-          email: driverPersonalInfo.email,
-          phone: driverPersonalInfo.phone,
-          profileImage: driverPersonalInfo.profileImage,
-          rating: driverData.rating || 4.5,
-          vehicle: `${vehicleDetails.year} ${vehicleDetails.make} ${vehicleDetails.model}`.trim(),
-          vehicleDetails: vehicleDetails,
-          vehicleType: vehicleDetails.vehicleType,
-          licensePlate: vehicleDetails.licensePlate,
-          latitude: driverData.latitude || null,
-          longitude: driverData.longitude || null,
-          isAvailable: driverData.isAvailable !== false,
-          uid: driverData.uid || driverId,
-          licenseNumber: driverData.licenseNumber || 'Unknown License',
-          vehicleRegistration: driverData.vehicleRegistration || 'Unknown Registration',
-        };
-
-        driversFromFirestore.push(driverInfo);
+      } catch (error) {
+        console.error('Error fetching ride data for previousDrivers:', error);
       }
-
-      const driversWithLocation = driversFromFirestore.filter(driver => {
-        return driver.latitude && driver.longitude && driver.isAvailable;
-      });
-
-      let finalDrivers = driversWithLocation;
-      if (driversWithLocation.length === 0) {
-        const availableDrivers = driversFromFirestore.filter(driver => driver.isAvailable);
-        finalDrivers = availableDrivers.map((driver, index) => ({
-            ...driver,
-            latitude: pickup.latitude + (Math.random() - 0.5) * 0.01,
-            longitude: pickup.longitude + (Math.random() - 0.5) * 0.01,
-          }));
-      } else {
-        finalDrivers = driversWithLocation.filter(driver => {
-          const distanceKm = haversine(
-            { latitude: driver.latitude, longitude: driver.longitude },
-            { latitude: pickup.latitude, longitude: pickup.longitude }
-          ) / 1000;
-          return distanceKm <= 10;
-        });
-      }
-
-      if (finalDrivers.length === 0) {
-        Alert.alert('No available drivers found nearby.');
-        return;
-      }
-
-      setDrivers(finalDrivers);
-      setDriversVisible(true);
-      
-    } catch (error) {
-      console.error('Error fetching drivers:', error);
-      Alert.alert('Error fetching drivers', error.message);
-    } finally {
-      setFetchingDrivers(false);
     }
-  };
 
+    // Add the specifically excluded driver if provided
+    if (excludeDriverId && !previousDrivers.includes(excludeDriverId)) {
+      previousDrivers.push(excludeDriverId);
+    }
+
+    console.log('Excluding drivers:', previousDrivers);
+
+    // Fetch available drivers
+    const driversRef = collection(db, 'drivers');
+    const querySnapshot = await getDocs(driversRef);
+
+    const driversFromFirestore = [];
+    for (const driverDoc of querySnapshot.docs) {
+      const driverData = driverDoc.data();
+      const driverId = driverDoc.id;
+
+      // Skip if not available or is in exclusion list
+      if (driverData.isAvailable === false || previousDrivers.includes(driverId)) {
+        console.log(`Skipping driver ${driverId}: not available or in exclusion list`);
+        continue;
+      }
+
+      // Fetch driver personal info
+      let driverPersonalInfo = {
+        firstname: 'Unknown',
+        lastname: 'Driver',
+        profileImage: null,
+      };
+      
+      try {
+        const userDocSnap = await getDoc(doc(db, 'users', driverId));
+        if (userDocSnap.exists()) {
+          const userData = userDocSnap.data();
+          driverPersonalInfo = {
+            firstname: userData.firstname || 'Unknown',
+            lastname: userData.lastname || 'Driver',
+            profileImage: userData.profileImage || userData.photoURL || null,
+          };
+        }
+      } catch (err) {
+        console.error(`Error fetching user info for driver ${driverId}:`, err);
+      }
+
+      // Vehicle info
+      const vehicleInfo = driverData.vehicleInfo || {};
+      const vehicleDetails = {
+        make: vehicleInfo.make || 'Unknown Make',
+        model: vehicleInfo.model || 'Unknown Model',
+        year: vehicleInfo.year || 'Unknown Year',
+        color: vehicleInfo.color || 'Unknown Color',
+        licensePlate: vehicleInfo.plateNumber || vehicleInfo.licensePlate || 'Unknown Plate',
+        vehicleType: vehicleInfo.vehicleType || 'car',
+      };
+
+      driversFromFirestore.push({
+        id: driverId,
+        name: `${driverPersonalInfo.firstname} ${driverPersonalInfo.lastname}`.trim(),
+        firstname: driverPersonalInfo.firstname,
+        lastname: driverPersonalInfo.lastname,
+        profileImage: driverPersonalInfo.profileImage,
+        rating: driverData.rating || 4.5,
+        vehicle: `${vehicleDetails.year} ${vehicleDetails.make} ${vehicleDetails.model}`.trim(),
+        vehicleDetails,
+        latitude: driverData.latitude,
+        longitude: driverData.longitude,
+        isAvailable: true,
+      });
+    }
+
+    // Filter drivers within 10km
+    const driversWithLocation = driversFromFirestore.filter(
+      (d) => d.latitude && d.longitude
+    );
+
+    let finalDrivers = driversWithLocation.filter((driver) => {
+      const distanceKm = haversine(
+        { latitude: driver.latitude, longitude: driver.longitude },
+        { latitude: pickup.latitude, longitude: pickup.longitude }
+      ) / 1000;
+      return distanceKm <= 10; // Within 10km
+    });
+
+    if (finalDrivers.length === 0) {
+      Alert.alert(
+        'No Available Drivers',
+        isReassignment 
+          ? 'No other drivers are available nearby. You can try again later or cancel the ride.'
+          : 'No drivers are available nearby at the moment. Please try again later.',
+        isReassignment 
+          ? [
+              { text: 'Try Again', onPress: () => fetchNearbyDrivers(excludeDriverId) },
+              { text: 'Cancel Ride', onPress: cancelCurrentRide, style: 'destructive' }
+            ]
+          : [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    console.log(`Found ${finalDrivers.length} available drivers`);
+    setDrivers(finalDrivers);
+    setDriversVisible(true);
+  } catch (error) {
+    console.error('Error fetching drivers:', error);
+    Alert.alert('Error', 'Could not fetch drivers. Please try again.');
+  } finally {
+    setFetchingDrivers(false);
+  }
+};
   useEffect(() => {
     fetchPricing();
   }, []);
@@ -681,29 +846,8 @@ const fetchNearbyDrivers = async () => {
     </TouchableOpacity>
   );
 
-  const onConfirmOrder = async () => {
-  if (hasActiveRide && rideStatus !== 'cancelled_by_driver') {
-    Alert.alert(
-      'Active Ride Exists',
-      'You already have an active ride. Please complete or cancel your current ride before booking a new one.',
-      [
-        {
-          text: 'View Ride',
-          onPress: () => navigation.navigate('RideTracking', { rideId: activeRideId })
-        },
-        {
-          text: 'Cancel Ride',
-          onPress: cancelCurrentRide,
-          style: 'destructive'
-        },
-        {
-          text: 'OK',
-          style: 'cancel'
-        }
-      ]
-    );
-    return;
-  }
+const onConfirmOrder = async () => {
+  // If in reassignment mode, directly show drivers
 
   if (!pickup || !dropoff) {
     Alert.alert('Missing Details', 'Please set both pickup and dropoff locations');
@@ -714,12 +858,7 @@ const fetchNearbyDrivers = async () => {
     Alert.alert(
       'Payment Required',
       'Please select a payment method before confirming your order.',
-      [
-        {
-          text: 'OK',
-          onPress: () => setPaymentModalVisible(true),
-        },
-      ]
+      [{ text: 'OK', onPress: () => setPaymentModalVisible(true) }]
     );
     return;
   }
@@ -727,9 +866,107 @@ const fetchNearbyDrivers = async () => {
   await fetchNearbyDrivers();
 };
 
+
+const saveRideToFirestore = async () => {
+  if (!auth.currentUser || !pickup || !dropoff || !price || !selectedTransport) {
+    Alert.alert('Missing Information', 'Please complete all ride details before booking');
+    return null;
+  }
+
+  try {
+    const rideId = doc(collection(db, 'rides')).id;
+    
+    const rideData = {
+      rideId,
+      userId: auth.currentUser.uid,
+      pickup: {
+        name: pickup.address,
+        latitude: pickup.latitude,
+        longitude: pickup.longitude,
+        address: pickup.address
+      },
+      dropoff: {
+        name: dropoff.address,
+        latitude: dropoff.latitude,
+        longitude: dropoff.longitude,
+        address: dropoff.address
+      },
+      price: parseFloat(price),
+      distance: parseFloat(distance),
+      transport: selectedTransport,
+      paymentMethod,
+      timestamp: serverTimestamp(),
+      status: 'pending',
+      travelTime: travelTime,
+      createdAt: serverTimestamp()
+    };
+
+    await setDoc(doc(db, 'rides', rideId), rideData);
+    console.log('Ride saved with ID:', rideId);
+    return rideId;
+  } catch (error) {
+    console.error('Error saving ride:', error);
+    Alert.alert('Error', 'Could not save ride details. Please try again.');
+    return null;
+  }
+};
+
   const renderDriverItem = ({ item }) => {
-    const isSelected = selectedDriver?.id === item.id;
-    const vehicleDetails = item.vehicleDetails || {};
+  const isSelected = selectedDriver?.id === item.id;
+  const vehicleDetails = item.vehicleDetails || {};
+
+ // 5. Enhanced cancelCurrentRide with proper cleanup
+const cancelCurrentRide = async () => {
+  if (!currentRideId) return;
+  
+  Alert.alert(
+    'Cancel Ride',
+    'Are you sure you want to cancel this ride?',
+    [
+      { text: 'No', style: 'cancel' },
+      {
+        text: 'Yes, Cancel',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await setDoc(doc(db, 'rides', currentRideId), {
+              status: 'cancelled',
+              cancelledAt: serverTimestamp(),
+              cancelledBy: 'user',
+              updatedAt: serverTimestamp()
+            }, { merge: true });
+            
+            // Complete state reset
+            setHasActiveRide(false);
+            setCurrentRideId(null);
+            setActiveRideId(null);
+            setRideStatus(null);
+            setSelectedDriver(null);
+            setDriverLocationUpdates(null);
+            setTrackingEta(null);
+            setNeedsReassignment(false);
+            setDriversVisible(false);
+            
+            // Clear form
+            setPickup(null);
+            setDropoff(null);
+            setFromLocation('');
+            setToLocation('');
+            setPrice(null);
+            setDistance(null);
+            setTravelTime(null);
+            setRouteCoords([]);
+            
+            Alert.alert('Ride Cancelled', 'Your ride has been cancelled successfully.');
+          } catch (error) {
+            console.error('Error cancelling ride:', error);
+            Alert.alert('Error', 'Could not cancel ride. Please try again.');
+          }
+        }
+      }
+    ]
+  );
+};
     
     return (
       <TouchableOpacity
@@ -921,161 +1158,181 @@ const fetchNearbyDrivers = async () => {
         </View>
       )}
 
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 80}
-        style={[
-          styles.bottomSheet,
-          collapsed ? { maxHeight: 120 } : { maxHeight: '50%' },
-        ]}
-      >
-        <View style={styles.sheetContainer}>
-          <FlatList
-            data={showFromSuggestions ? fromSuggestions : showToSuggestions ? toSuggestions : []}
-            keyboardShouldPersistTaps="handled"
-            showsVerticalScrollIndicator={false}
-            ListHeaderComponent={
-              <>
-                {distance && travelTime && price && (
-                  <View style={styles.infoRow}>
-                    <View style={styles.infoBox}>
-                      <Ionicons name="navigate-outline" size={18} color="#FFA500" />
-                      <Text style={styles.infoText}>{distance} km</Text>
-                    </View>
-                    <View style={styles.infoBox}>
-                      <Ionicons name="time-outline" size={18} color="#FFA500" />
-                      <Text style={styles.infoText}>{travelTime} min ETA</Text>
-                    </View>
-                    <View style={styles.infoBox}>
-                      <Ionicons name="cash-outline" size={18} color="#FFA500" />
-                      <Text style={styles.infoText}>${price}</Text>
-                    </View>
-                  </View>
-                )}
+    <KeyboardAvoidingView
+  behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+  keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 80}
+  style={[
+    styles.bottomSheet,
+    collapsed ? { maxHeight: 120 } : { maxHeight: '50%' },
+  ]}
+>
+  <View style={styles.sheetContainer}>
+    <FlatList
+      data={showFromSuggestions ? fromSuggestions : showToSuggestions ? toSuggestions : []}
+      keyboardShouldPersistTaps="handled"
+      showsVerticalScrollIndicator={false}
+      ListHeaderComponent={
+        <>
+          {distance && travelTime && price && (
+            <View style={styles.infoRow}>
+              <View style={styles.infoBox}>
+                <Ionicons name="navigate-outline" size={18} color="#FFA500" />
+                <Text style={styles.infoText}>{distance} km</Text>
+              </View>
+              <View style={styles.infoBox}>
+                <Ionicons name="time-outline" size={18} color="#FFA500" />
+                <Text style={styles.infoText}>{travelTime} min ETA</Text>
+              </View>
+              <View style={styles.infoBox}>
+                <Ionicons name="cash-outline" size={18} color="#FFA500" />
+                <Text style={styles.infoText}>${price}</Text>
+              </View>
+            </View>
+          )}
 
-                <View style={styles.inputContainer}>
-                  <View style={styles.locationRow}>
-                    <TextInput
-                      ref={pickupInputRef}
-                      value={fromLocation}
-                      onChangeText={(text) => onLocationChange(text, true)}
-                      placeholder="Pickup Location"
-                      style={styles.input}
-                    />
-                    <TouchableOpacity
-                      onPress={() => pickupInputRef.current?.focus()}
-                      style={styles.editIcon}
-                    >
-                      <Ionicons
-                        name="create-outline"
-                        size={20}
-                        color={darkMode ? '#FFA500' : '#444'}
-                      />
-                    </TouchableOpacity>
-                  </View>
+          <View style={styles.inputContainer}>
+            <View style={styles.locationRow}>
+              <TextInput
+                ref={pickupInputRef}
+                value={fromLocation}
+                onChangeText={(text) => onLocationChange(text, true)}
+                placeholder="Pickup Location"
+                style={styles.input}
+              />
+              <TouchableOpacity
+                onPress={() => pickupInputRef.current?.focus()}
+                style={styles.editIcon}
+              >
+                <Ionicons
+                  name="create-outline"
+                  size={20}
+                  color={darkMode ? '#FFA500' : '#444'}
+                />
+              </TouchableOpacity>
+            </View>
 
-                  <View style={styles.locationRow}>
-                    <TextInput
-                      ref={dropoffInputRef}
-                      value={toLocation}
-                      onChangeText={(text) => onLocationChange(text, false)}
-                      placeholder="Dropoff Location"
-                      style={styles.input}
-                    />
-                    <TouchableOpacity
-                      onPress={() => dropoffInputRef.current?.focus()}
-                      style={styles.editIcon}
-                    >
-                      <Ionicons
-                        name="create-outline"
-                        size={20}
-                        color={darkMode ? '#FFA500' : '#444'}
-                      />
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              </>
-            }
-            renderItem={({ item }) => renderSuggestion(item, showFromSuggestions)}
-            ListFooterComponent={
-              <>
-                <View style={styles.transportRow}>
-                  {['taxi', 'bus', 'van'].map((type) => (
-                    <TouchableOpacity
-                      key={type}
-                      style={[
-                        styles.transportOption,
-                        selectedTransport === type && styles.transportSelected,
-                      ]}
-                      onPress={() => setSelectedTransport(type)}
-                    >
-                      <Ionicons
-                        name={
-                          type === 'taxi'
-                            ? 'car-sport'
-                            : type === 'bus'
-                            ? 'bus'
-                            : 'car-outline'
-                        }
-                        size={20}
-                        color="#fff"
-                      />
-                      <Text style={styles.transportText}>{type.toUpperCase()}</Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-
-                {loading && (
-                  <ActivityIndicator color="#FFA500" style={{ marginVertical: 10 }} />
-                )}
-
-                <TouchableOpacity
-                  style={styles.paymentButton}
-                  onPress={() => setPaymentModalVisible(true)}
-                >
-                  <MaterialIcons name="payment" size={24} color="#FFA500" />
-                  <Text style={styles.paymentButtonText}>Payment</Text>
-                  <Ionicons name="chevron-forward" size={24} color="#FFA500" />
-                </TouchableOpacity>
-{paymentDone && (
-  <TouchableOpacity
-    style={[
-      styles.paymentButton, 
-      { 
-        marginTop: 10,
-        backgroundColor: hasActiveRide ? '#ccc' : '#FFA500',
-        opacity: hasActiveRide ? 0.7 : 1
+            <View style={styles.locationRow}>
+              <TextInput
+                ref={dropoffInputRef}
+                value={toLocation}
+                onChangeText={(text) => onLocationChange(text, false)}
+                placeholder="Dropoff Location"
+                style={styles.input}
+              />
+              <TouchableOpacity
+                onPress={() => dropoffInputRef.current?.focus()}
+                style={styles.editIcon}
+              >
+                <Ionicons
+                  name="create-outline"
+                  size={20}
+                  color={darkMode ? '#FFA500' : '#444'}
+                />
+              </TouchableOpacity>
+            </View>
+          </View>
+        </>
       }
-    ]}
-    onPress={onConfirmOrder}
-    disabled={fetchingDrivers || hasActiveRide}
-  >
-    {fetchingDrivers ? (
-      <ActivityIndicator color="#fff" />
-    ) : (
-      <>
-        <MaterialIcons 
-          name={hasActiveRide ? "error-outline" : "check-circle"} 
-          size={24} 
-          color="#fff" 
-        />
-        <Text style={[styles.paymentButtonText, { color: '#fff' }]}>
-          {hasActiveRide ? 'Active Ride Exists' : 'Confirm Order'}
-        </Text>
-        {!hasActiveRide && (
-          <Ionicons name="chevron-forward" size={24} color="#fff" />
-        )}
-      </>
-    )}
-  </TouchableOpacity>
-)}
-              </>
-            }
-            contentContainerStyle={{ paddingBottom: 30 }}
-          />
-        </View>
-      </KeyboardAvoidingView>
+      renderItem={({ item }) => renderSuggestion(item, showFromSuggestions)}
+      ListFooterComponent={
+        <>
+          <View style={styles.transportRow}>
+            {['taxi', 'bus', 'van'].map((type) => (
+              <TouchableOpacity
+                key={type}
+                style={[
+                  styles.transportOption,
+                  selectedTransport === type && styles.transportSelected,
+                ]}
+                onPress={() => setSelectedTransport(type)}
+              >
+                <Ionicons
+                  name={
+                    type === 'taxi'
+                      ? 'car-sport'
+                      : type === 'bus'
+                      ? 'bus'
+                      : 'car-outline'
+                  }
+                  size={20}
+                  color="#fff"
+                />
+                <Text style={styles.transportText}>{type.toUpperCase()}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
 
+          {loading && (
+            <ActivityIndicator color="#FFA500" style={{ marginVertical: 10 }} />
+          )}
+
+          <TouchableOpacity
+            style={styles.paymentButton}
+            onPress={() => setPaymentModalVisible(true)}
+          >
+            <MaterialIcons name="payment" size={24} color="#FFA500" />
+            <Text style={styles.paymentButtonText}>Payment</Text>
+            <Ionicons name="chevron-forward" size={24} color="#FFA500" />
+          </TouchableOpacity>
+
+          {/* Added Reassign Driver Button */}
+          {needsReassignment && (
+            <TouchableOpacity
+              style={[
+                styles.paymentButton, 
+                { 
+                  backgroundColor: '#FFA500',
+                  marginTop: 10
+                }
+              ]}
+              onPress={() => fetchNearbyDrivers()}
+            >
+              <MaterialIcons name="person-search" size={24} color="#fff" />
+              <Text style={[styles.paymentButtonText, { color: '#fff' }]}>
+                Reassign Driver
+              </Text>
+              <Ionicons name="chevron-forward" size={24} color="#fff" />
+            </TouchableOpacity>
+          )}
+
+          {paymentDone && (
+            <TouchableOpacity
+              style={[
+                styles.paymentButton, 
+                { 
+                  marginTop: 10,
+                  backgroundColor: hasActiveRide ? '#ccc' : '#FFA500',
+                  opacity: hasActiveRide ? 0.7 : 1
+                }
+              ]}
+              onPress={onConfirmOrder}
+              disabled={fetchingDrivers || hasActiveRide}
+            >
+              {fetchingDrivers ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <>
+                  <MaterialIcons 
+                    name={hasActiveRide ? "error-outline" : "check-circle"} 
+                    size={24} 
+                    color="#fff" 
+                  />
+                  <Text style={[styles.paymentButtonText, { color: '#fff' }]}>
+                    {hasActiveRide ? 'Active Ride Exists' : 'Confirm Order'}
+                  </Text>
+                  {!hasActiveRide && (
+                    <Ionicons name="chevron-forward" size={24} color="#fff" />
+                  )}
+                </>
+              )}
+            </TouchableOpacity>
+          )}
+        </>
+      }
+      contentContainerStyle={{ paddingBottom: 30 }}
+    />
+  </View>
+</KeyboardAvoidingView>
       {/* Payment Method Modal */}
       <Modal
         visible={paymentModalVisible}
@@ -1181,44 +1438,44 @@ const fetchNearbyDrivers = async () => {
                 <Text style={{ color: '#000' }}>Cancel</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity
-                onPress={async () => {
-                  if (!selectedDriver) {
-                    Alert.alert('Select Driver', 'Please choose a driver to continue.');
-                    return;
-                  }
+              
 
-                  try {
-                    const rideId = await saveRideToFirestore();
-                    if (!rideId) return;
+    // In the driver selection modal's confirm button:
+<TouchableOpacity
+  onPress={async () => {
+    if (!selectedDriver) {
+      Alert.alert('Select Driver', 'Please choose a driver to continue.');
+      return;
+    }
 
-                    const bookingSuccess = await bookRide(rideId, selectedDriver.id, pickup, dropoff);
-                    
-                    if (bookingSuccess) {
-                      setCurrentRideId(rideId);
-                      setDriversVisible(false);
-                      Alert.alert(
-                        'Ride Booked!',
-                        `Your ride with ${selectedDriver.name} has been booked successfully.`,
-                        [
-                          {
-                            text: 'OK',
-                            onPress: () => {
-                              // Stay on this screen to track the driver
-                            },
-                          },
-                        ]
-                      );
-                    }
-                  } catch (err) {
-                    console.error('Error booking ride:', err);
-                    Alert.alert('Booking Failed', 'An error occurred while booking the ride.');
-                  }
-                }}
-                style={[styles.modalButton, { backgroundColor: '#FFA500' }]}
-              >
-                <Text style={{ color: '#fff' }}>Confirm</Text>
-              </TouchableOpacity>
+    try {
+      const isReassignment = needsReassignment || rideStatus === 'needs_reassignment';
+      const rideId = isReassignment ? currentRideId : await saveRideToFirestore();
+      
+      if (!rideId) return;
+
+      const bookingSuccess = await bookRide(rideId, selectedDriver.id, pickup, dropoff, isReassignment);
+      
+      if (bookingSuccess) {
+        setCurrentRideId(rideId);
+        setDriversVisible(false);
+        Alert.alert(
+          isReassignment ? 'Driver Reassigned!' : 'Ride Booked!',
+          `Your ride with ${selectedDriver.name} has been ${isReassignment ? 'reassigned' : 'booked'} successfully.`
+        );
+      }
+    } catch (err) {
+      console.error('Error booking ride:', err);
+      Alert.alert('Booking Failed', 'An error occurred while booking the ride.');
+    }
+  }}
+  style={[styles.modalButton, { backgroundColor: '#FFA500' }]}
+>
+  <Text style={{ color: '#fff' }}>
+    {needsReassignment ? 'Reassign Driver' : 'Confirm Booking'}
+  </Text>
+</TouchableOpacity>
+
             </View>
           </View>
         </View>

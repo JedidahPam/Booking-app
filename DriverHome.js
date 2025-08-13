@@ -26,10 +26,13 @@ import {
   runTransaction,
   serverTimestamp,
 } from 'firebase/firestore';
-import { useColorScheme } from 'react-native';
+import { useTheme } from './ThemeContext';
 import { getDocs } from 'firebase/firestore';
+import { Ionicons } from '@expo/vector-icons';
 
 export default function DriverHome({ navigation }) {
+  const { darkMode, toggleDarkMode } = useTheme();
+  const styles = createStyles(darkMode);
   const [driverLocation, setDriverLocation] = useState(null);
   const [loading, setLoading] = useState(true);
   const [rides, setRides] = useState([]);
@@ -37,17 +40,10 @@ export default function DriverHome({ navigation }) {
   const [expandedRideId, setExpandedRideId] = useState(null);
   const [selectedRideType, setSelectedRideType] = useState('All');
   const [acceptedRidesCount, setAcceptedRidesCount] = useState(0);
-  const colorScheme = useColorScheme();
-  const isDarkMode = colorScheme === 'dark';
-  const styles = createStyles(isDarkMode);
-
-  // Keep reference to location subscription to remove on cleanup
+  
   const locationSubscriptionRef = useRef(null);
-  // Keep unsubscribe function from Firestore query
   const ridesUnsubscribeRef = useRef(null);
-  // Keep unsubscribe function for accepted rides count
   const acceptedRidesUnsubscribeRef = useRef(null);
-  // Add throttling ref for subscriptions
   const subscribeToRidesThrottled = useRef(null);
 
   useEffect(() => {
@@ -55,7 +51,6 @@ export default function DriverHome({ navigation }) {
     subscribeToAcceptedRides();
 
     return () => {
-      // Clear throttled subscription
       if (subscribeToRidesThrottled.current) {
         clearTimeout(subscribeToRidesThrottled.current);
       }
@@ -110,16 +105,13 @@ export default function DriverHome({ navigation }) {
     };
     setDriverLocation(coords);
     await updateDriverLocation(coords);
-
-    // Subscribe to Firestore rides query with real-time updates (initial subscription)
     subscribeToRides(coords);
 
-    // Start location watcher with less frequent updates
     locationSubscriptionRef.current = await Location.watchPositionAsync(
       {
         accuracy: Location.Accuracy.High,
-        distanceInterval: 50, // Increased from 10 to reduce frequency
-        timeInterval: 30000,  // Increased from 10000 to 30 seconds
+        distanceInterval: 50,
+        timeInterval: 30000,
       },
       async (loc) => {
         const newCoords = {
@@ -127,19 +119,16 @@ export default function DriverHome({ navigation }) {
           longitude: loc.coords.longitude,
         };
         
-        // Only update if location changed significantly
         const oldCoords = driverLocation;
         if (oldCoords) {
           const distance = haversine(oldCoords, newCoords);
-          if (distance < 100) { // Less than 100 meters, skip update
+          if (distance < 100) {
             return;
           }
         }
         
         setDriverLocation(newCoords);
         await updateDriverLocation(newCoords);
-        
-        // Re-subscribe only if location changed significantly
         subscribeToRides(newCoords);
       }
     );
@@ -153,8 +142,6 @@ export default function DriverHome({ navigation }) {
       if (!driverId) return;
       
       const driverRef = doc(db, 'drivers', driverId);
-      
-      // Check if driver document exists
       const driverDoc = await getDoc(driverRef);
       
       const driverData = {
@@ -165,20 +152,17 @@ export default function DriverHome({ navigation }) {
       };
 
       if (!driverDoc.exists()) {
-        // Create new driver document with additional fields
         await setDoc(driverRef, {
           ...driverData,
           userId: driverId,
           createdAt: serverTimestamp(),
-          // Add any other driver fields you need
           name: auth.currentUser?.displayName || 'Driver',
           email: auth.currentUser?.email || '',
-          vehicleType: 'taxi', // Default vehicle type
+          vehicleType: 'taxi',
           status: 'active',
         });
         console.log('Driver document created successfully');
       } else {
-        // Update existing document
         await updateDoc(driverRef, driverData);
       }
     } catch (err) {
@@ -202,102 +186,102 @@ export default function DriverHome({ navigation }) {
     }
   };
 
-  // Modified subscribeToRides with throttling and better duplicate prevention
-  const subscribeToRides = (coords) => {
-    // Clear any existing throttled call
-    if (subscribeToRidesThrottled.current) {
-      clearTimeout(subscribeToRidesThrottled.current);
+const subscribeToRides = (coords) => {
+  if (subscribeToRidesThrottled.current) {
+    clearTimeout(subscribeToRidesThrottled.current);
+  }
+
+  subscribeToRidesThrottled.current = setTimeout(() => {
+    if (ridesUnsubscribeRef.current) {
+      ridesUnsubscribeRef.current();
+      ridesUnsubscribeRef.current = null;
     }
 
-    // Throttle the subscription to prevent frequent re-subscriptions
-    subscribeToRidesThrottled.current = setTimeout(() => {
-      // Unsubscribe previous listener to avoid duplicates
-      if (ridesUnsubscribeRef.current) {
-        ridesUnsubscribeRef.current();
-        ridesUnsubscribeRef.current = null;
-      }
+    console.log('Creating new rides subscription at:', new Date().toISOString());
+    setLoading(true);
 
-      console.log('Creating new rides subscription at:', new Date().toISOString());
-      setLoading(true);
+    const driverId = auth.currentUser?.uid;
+    if (!driverId) return;
 
-      const ridesQuery = query(
-        collection(db, 'rides'),
-        where('status', '==', 'pending')
-      );
+    const ridesQuery = query(
+      collection(db, 'rides'),
+      where('status', '==', 'pending')
+    );
 
-      ridesUnsubscribeRef.current = onSnapshot(
-        ridesQuery,
-        (snapshot) => {
-          const nearbyRides = [];
-          const processedRideIds = new Set();
+    ridesUnsubscribeRef.current = onSnapshot(
+      ridesQuery,
+      (snapshot) => {
+        const nearbyRides = [];
+        const processedRideIds = new Set();
 
-          snapshot.forEach((docSnap) => {
-            const data = docSnap.data();
-            const rideId = docSnap.id;
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          const rideId = docSnap.id;
 
-            // Skip if already processed (additional safety)
-            if (processedRideIds.has(rideId)) {
-              console.warn(`Duplicate ride ID detected: ${rideId}`);
-              return;
-            }
-            processedRideIds.add(rideId);
+          if (processedRideIds.has(rideId)) {
+            console.warn(`Duplicate ride ID detected: ${rideId}`);
+            return;
+          }
+          processedRideIds.add(rideId);
 
-            // Handle both nested and flat pickup structure
-            let pickupLocation = data.pickupLocation;
-            if (data.pickup && data.pickup.latitude) {
-              pickupLocation = data.pickup;
-            }
+          // Skip if current driver is in previousDrivers array
+          if (data.previousDrivers && data.previousDrivers.includes(driverId)) {
+            console.log(`Skipping ride ${rideId} - driver was previously assigned`);
+            return;
+          }
 
-            if (!pickupLocation || !pickupLocation.latitude) return;
+          let pickupLocation = data.pickupLocation;
+          if (data.pickup && data.pickup.latitude) {
+            pickupLocation = data.pickup;
+          }
 
-            const rideCoords = {
-              latitude: pickupLocation.latitude,
-              longitude: pickupLocation.longitude,
-            };
+          if (!pickupLocation || !pickupLocation.latitude) return;
 
-            const distanceKm = haversine(coords, rideCoords) / 1000;
+          const rideCoords = {
+            latitude: pickupLocation.latitude,
+            longitude: pickupLocation.longitude,
+          };
 
-            if (distanceKm <= 30) {
-              nearbyRides.push({
-                id: rideId,
-                pickup: pickupLocation.address || data.pickup?.address || 'N/A',
-                dropoff: data.dropoffLocation?.address || data.dropoff?.address || 'N/A',
-                rideType: data.rideType || 'taxi',
-                passengerCount: data.passengerCount || '1',
-                scheduledTime: data.scheduledTime ? data.scheduledTime.toDate() : '',
-                specialRequests: data.specialRequests || '',
-                location: rideCoords,
-                distance: distanceKm.toFixed(1),
-              });
-            }
-          });
+          const distanceKm = haversine(coords, rideCoords) / 1000;
 
-          // Sort by distance (closest rides first)
-          nearbyRides.sort((a, b) => parseFloat(a.distance) - parseFloat(b.distance));
+          if (distanceKm <= 30) {
+            nearbyRides.push({
+              id: rideId,
+              pickup: pickupLocation.address || data.pickup?.address || 'N/A',
+              dropoff: data.dropoffLocation?.address || data.dropoff?.address || 'N/A',
+              rideType: data.rideType || 'taxi',
+              passengerCount: data.passengerCount || '1',
+              scheduledTime: data.scheduledTime ? data.scheduledTime.toDate() : '',
+              specialRequests: data.specialRequests || '',
+              location: rideCoords,
+              distance: distanceKm.toFixed(1),
+            });
+          }
+        });
 
-          // Use functional update to avoid stale closure issues
-          setRides(prevRides => {
-            // Only update if the rides have actually changed
-            const ridesChanged = JSON.stringify(prevRides.map(r => r.id).sort()) !== 
-                               JSON.stringify(nearbyRides.map(r => r.id).sort());
-            
-            if (ridesChanged) {
-              console.log(`Rides updated: ${nearbyRides.length} rides found`);
-              return nearbyRides;
-            }
-            return prevRides;
-          });
+        nearbyRides.sort((a, b) => parseFloat(a.distance) - parseFloat(b.distance));
+
+        setRides(prevRides => {
+          const ridesChanged = JSON.stringify(prevRides.map(r => r.id).sort()) !== 
+                             JSON.stringify(nearbyRides.map(r => r.id).sort());
           
-          setLoading(false);
-        },
-        (error) => {
-          console.error('Error fetching rides:', error);
-          setError('Failed to fetch rides');
-          setLoading(false);
-        }
-      );
-    }, 2000); // 2-second throttle
-  };
+          if (ridesChanged) {
+            console.log(`Rides updated: ${nearbyRides.length} rides found`);
+            return nearbyRides;
+          }
+          return prevRides;
+        });
+        
+        setLoading(false);
+      },
+      (error) => {
+        console.error('Error fetching rides:', error);
+        setError('Failed to fetch rides');
+        setLoading(false);
+      }
+    );
+  }, 2000);
+};
 
   const handleAccept = async (rideId) => {
     const driverId = auth.currentUser?.uid;
@@ -306,7 +290,6 @@ export default function DriverHome({ navigation }) {
       return;
     }
 
-    // First check if the driver already has an active ride
     const activeRidesQuery = query(
       collection(db, 'rides'),
       where('acceptedBy', '==', driverId),
@@ -362,7 +345,6 @@ export default function DriverHome({ navigation }) {
     const rideRef = doc(db, 'rides', rideId);
 
     try {
-      // Use a transaction to ensure atomicity in case of concurrent updates
       await runTransaction(db, async (transaction) => {
         const rideDoc = await transaction.get(rideRef);
         if (!rideDoc.exists()) {
@@ -371,14 +353,12 @@ export default function DriverHome({ navigation }) {
 
         transaction.update(rideRef, {
           status: 'declined',
-          declinedBy: driverId, // Record which driver declined it
-          declinedAt: serverTimestamp(), // Record when it was declined
+          declinedBy: driverId,
+          declinedAt: serverTimestamp(),
         });
       });
 
       Alert.alert('Success', 'Ride has been declined and removed from your list.');
-
-      // Remove from local state
       setRides(prev => prev.filter(ride => ride.id !== rideId));
       
     } catch (error) {
@@ -497,11 +477,12 @@ export default function DriverHome({ navigation }) {
           }}
           showsUserLocation
           showsMyLocationButton
+          userInterfaceStyle={darkMode ? 'dark' : 'light'}
         >
           <Marker 
             coordinate={driverLocation} 
             title="You are here" 
-            pinColor="blue"
+            pinColor={darkMode ? '#FFA500' : 'blue'}
             anchor={{ x: 0.5, y: 0.5 }}
           />
           {rides.map((ride) => (
@@ -510,7 +491,7 @@ export default function DriverHome({ navigation }) {
               coordinate={ride.location}
               title={`${ride.rideType} - ${ride.distance}km`}
               description={ride.pickup}
-              pinColor="orange"
+              pinColor={darkMode ? '#FF7043' : 'orange'}
             />
           ))}
         </MapView>
@@ -518,9 +499,17 @@ export default function DriverHome({ navigation }) {
 
       <SafeAreaView style={styles.container}>
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>Available Rides ({rides.length})</Text>
+          <View style={styles.headerLeft}>
+            <Text style={styles.headerTitle}>Available Rides ({rides.length})</Text>
+            <TouchableOpacity onPress={toggleDarkMode} style={styles.themeToggle}>
+              <Ionicons 
+                name={darkMode ? 'sunny' : 'moon'} 
+                size={24} 
+                color={darkMode ? '#FFA500' : '#007AFF'} 
+              />
+            </TouchableOpacity>
+          </View>
           
-          {/* Navigation button to trips */}
           {acceptedRidesCount > 0 && (
             <TouchableOpacity 
               style={styles.tripsButton}
@@ -557,6 +546,11 @@ export default function DriverHome({ navigation }) {
 
         {filteredRides.length === 0 ? (
           <View style={styles.emptyContainer}>
+            <Ionicons 
+              name="time-outline" 
+              size={48} 
+              color={darkMode ? '#555' : '#ccc'} 
+            />
             <Text style={styles.emptyText}>
               {selectedRideType === 'All' 
                 ? "No nearby ride requests." 
@@ -577,184 +571,195 @@ export default function DriverHome({ navigation }) {
   );
 }
 
-const createStyles = (isDarkMode) =>
-  StyleSheet.create({
-    container: {
-      flex: 1,
-      paddingHorizontal: 16,
-      paddingTop: 10,
-      backgroundColor: isDarkMode ? 'rgba(10, 10, 10, 0.85)' : '#f2f2f2',
-    },
-    header: {
-      marginBottom: 10,
-    },
-    headerTitle: {
-      color: isDarkMode ? '#FFA500' : '#222',
-      fontSize: 18,
-      fontWeight: 'bold',
-      textAlign: 'center',
-      marginBottom: 8,
-    },
-    tripsButton: {
-      backgroundColor: '#4CAF50',
-      paddingHorizontal: 16,
-      paddingVertical: 8,
-      borderRadius: 20,
-      alignSelf: 'center',
-      shadowColor: '#4CAF50',
-      shadowOffset: { width: 0, height: 2 },
-      shadowOpacity: 0.3,
-      shadowRadius: 4,
-      elevation: 4,
-    },
-    tripsButtonText: {
-      color: '#FFFFFF',
-      fontSize: 14,
-      fontWeight: 'bold',
-    },
-    card: {
-      backgroundColor: isDarkMode ? 'rgba(30, 30, 30, 0.9)' : '#fff',
-      borderRadius: 20,
-      padding: 18,
-      marginBottom: 18,
-      borderWidth: 1,
-      borderColor: isDarkMode ? 'rgba(255, 165, 0, 0.3)' : '#ddd',
-      shadowColor: '#FFA500',
-      shadowOffset: { width: 0, height: 6 },
-      shadowOpacity: 0.2,
-      shadowRadius: 10,
-      elevation: 10,
-    },
-    cardHeader: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      alignItems: 'center',
-      marginBottom: 12,
-    },
-    rideTypeContainer: {
-      backgroundColor: '#FFA500',
-      paddingHorizontal: 10,
-      paddingVertical: 4,
-      borderRadius: 12,
-    },
-    rideType: {
-      color: '#000',
-      fontSize: 12,
-      fontWeight: 'bold',
-    },
-    distance: {
-      color: '#4CAF50',
-      fontSize: 14,
-      fontWeight: '600',
-    },
-    row: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      marginBottom: 8,
-      alignItems: 'flex-start',
-      gap: 10,
-    },
-    label: {
-      color: '#FFB84D',
-      fontSize: 14,
-      fontWeight: '600',
-      flexShrink: 0,
-      width: '30%',
-    },
-    value: {
-      color: isDarkMode ? '#FFFFFF' : '#222',
-      fontSize: 14,
-      fontWeight: '400',
-      flex: 1,
-      textAlign: 'right',
-    },
-    btnText: {
-      color: '#FFFFFF',
-      fontWeight: 'bold',
-      fontSize: 16,
-      letterSpacing: 0.5,
-    },
-    emptyContainer: {
-      flex: 1,
-      justifyContent: 'center',
-      alignItems: 'center',
-    },
-    emptyText: {
-      color: '#FFB84D',
-      fontSize: 16,
-      textAlign: 'center',
-    },
-    center: {
-      flex: 1,
-      justifyContent: 'center',
-      alignItems: 'center',
-      backgroundColor: isDarkMode ? '#000' : '#fff',
-    },
-    loadingText: {
-      color: '#FFA500',
-      fontSize: 16,
-      marginTop: 10,
-    },
-    errorText: {
-      color: '#FF4D4D',
-      fontSize: 16,
-      textAlign: 'center',
-      marginBottom: 20,
-    },
-    retryButton: {
-      backgroundColor: '#FFA500',
-      paddingHorizontal: 20,
-      paddingVertical: 10,
-      borderRadius: 8,
-    },
-    retryButtonText: {
-      color: '#000',
-      fontSize: 16,
-      fontWeight: 'bold',
-    },
-    buttonRow: {
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-      marginTop: 20,
-      gap: 12,
-    },
-    actionBtn: {
-      flex: 1,
-      paddingVertical: 14,
-      borderRadius: 12,
-      alignItems: 'center',
-      shadowColor: '#000',
-      shadowOffset: { width: 0, height: 3 },
-      shadowOpacity: 0.3,
-      shadowRadius: 4,
-      elevation: 4,
-    },
-    filterContainer: {
-      flexDirection: 'row',
-      justifyContent: 'center',
-      flexWrap: 'wrap',
-      marginBottom: 15,
-    },
-    filterButton: {
-      paddingHorizontal: 16,
-      paddingVertical: 8,
-      borderRadius: 20,
-      backgroundColor: isDarkMode ? 'rgba(51, 51, 51, 0.8)' : '#eee',
-      margin: 4,
-      borderWidth: 1,
-      borderColor: isDarkMode ? 'rgba(85, 85, 85, 0.8)' : '#ccc',
-    },
-    filterButtonActive: {
-      backgroundColor: '#FFA500',
-      borderColor: '#FFA500',
-    },
-    filterText: {
-      color: isDarkMode ? 'white' : '#222',
-      fontWeight: '500',
-      fontSize: 14,
-    },
-    filterTextActive: {
-      color: 'black',
-      fontWeight: '700',
-    },
-  });
+const createStyles = (darkMode) => StyleSheet.create({
+  container: {
+    flex: 1,
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    backgroundColor: darkMode ? 'rgba(10, 10, 10, 0.85)' : '#f2f2f2',
+  },
+ header: {
+  flexDirection: 'row',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+  padding: 16,
+  backgroundColor: darkMode ? '#1e1e1e' : '#fff',
+  borderBottomWidth: 1,
+  borderBottomColor: darkMode ? '#333' : '#e0e0e0',
+},
+  headerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+ headerTitle: {
+  fontSize: 24,
+  fontWeight: 'bold',
+  color: darkMode ? '#fff' : '#333',
+},
+ themeToggle: {
+  marginLeft: 12,
+},
+  tripsButton: {
+    backgroundColor: darkMode ? '#FFA500' : '#4CAF50',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    shadowColor: darkMode ? '#FFA500' : '#4CAF50',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  tripsButtonText: {
+    color: darkMode ? '#000' : '#FFFFFF',
+    fontSize: 14,
+    fontWeight: 'bold',
+  },
+  card: {
+    backgroundColor: darkMode ? 'rgba(30, 30, 30, 0.9)' : '#fff',
+    borderRadius: 20,
+    padding: 18,
+    marginBottom: 18,
+    borderWidth: 1,
+    borderColor: darkMode ? 'rgba(255, 165, 0, 0.3)' : '#ddd',
+    shadowColor: darkMode ? '#FFA500' : '#FFA500',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.2,
+    shadowRadius: 10,
+    elevation: 10,
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  rideTypeContainer: {
+    backgroundColor: darkMode ? '#FF7043' : '#FFA500',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  rideType: {
+    color: darkMode ? '#000' : '#000',
+    fontSize: 12,
+    fontWeight: 'bold',
+  },
+  distance: {
+    color: darkMode ? '#4CAF50' : '#4CAF50',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  row: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+    alignItems: 'flex-start',
+    gap: 10,
+  },
+  label: {
+    color: darkMode ? '#FFB84D' : '#FFA500',
+    fontSize: 14,
+    fontWeight: '600',
+    flexShrink: 0,
+    width: '30%',
+  },
+  value: {
+    color: darkMode ? '#FFFFFF' : '#222',
+    fontSize: 14,
+    fontWeight: '400',
+    flex: 1,
+    textAlign: 'right',
+  },
+  btnText: {
+    color: '#FFFFFF',
+    fontWeight: 'bold',
+    fontSize: 16,
+    letterSpacing: 0.5,
+  },
+  emptyContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  emptyText: {
+    color: darkMode ? '#FFB84D' : '#FFA500',
+    fontSize: 16,
+    textAlign: 'center',
+    marginTop: 10,
+  },
+  center: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: darkMode ? '#000' : '#fff',
+  },
+  loadingText: {
+    color: darkMode ? '#FFA500' : '#FFA500',
+    fontSize: 16,
+    marginTop: 10,
+  },
+  errorText: {
+    color: darkMode ? '#FF7043' : '#FF4D4D',
+    fontSize: 16,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  retryButton: {
+    backgroundColor: darkMode ? '#FFA500' : '#FFA500',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  retryButtonText: {
+    color: darkMode ? '#000' : '#000',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 20,
+    gap: 12,
+  },
+  actionBtn: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  filterContainer: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    flexWrap: 'wrap',
+    marginBottom: 15,
+  },
+  filterButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: darkMode ? 'rgba(51, 51, 51, 0.8)' : '#eee',
+    margin: 4,
+    borderWidth: 1,
+    borderColor: darkMode ? 'rgba(85, 85, 85, 0.8)' : '#ccc',
+  },
+  filterButtonActive: {
+    backgroundColor: darkMode ? '#FF7043' : '#FFA500',
+    borderColor: darkMode ? '#FF7043' : '#FFA500',
+  },
+  filterText: {
+    color: darkMode ? 'white' : '#222',
+    fontWeight: '500',
+    fontSize: 14,
+  },
+  filterTextActive: {
+    color: darkMode ? '#000' : '#000',
+    fontWeight: '700',
+  },
+});

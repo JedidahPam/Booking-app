@@ -10,7 +10,8 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { ThemeProvider } from './ThemeContext';
 import { doc, getDoc, onSnapshot } from 'firebase/firestore';
 import { auth, db } from './firebaseConfig';
-
+import { useTheme } from './ThemeContext';
+import { initUserStatusTracking } from './userStatusService'
 // Screens (keep your existing screen imports)
 import SignUp from './SignUp';
 import SignIn from './SignIn';
@@ -36,6 +37,8 @@ const Stack = createNativeStackNavigator();
 const Tab = createBottomTabNavigator();
 
 function MainTabs() {
+  const { darkMode } = useTheme();
+
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
@@ -47,9 +50,17 @@ function MainTabs() {
           else if (route.name === 'Profile') iconName = 'person-outline';
           return <Ionicons name={iconName} size={size} color={color} />;
         },
-        tabBarActiveTintColor: '#007bff',
-        tabBarInactiveTintColor: 'gray',
+        tabBarActiveTintColor: darkMode ? '#FFA500' : '#007bff',
+        tabBarInactiveTintColor: darkMode ? '#888' : 'gray',
         headerShown: false,
+        tabBarStyle: {
+          backgroundColor: darkMode ? '#1e1e1e' : '#fff',
+          borderTopColor: darkMode ? '#333' : '#e0e0e0',
+        },
+        tabBarLabelStyle: {
+          fontSize: 12,
+          marginBottom: 4,
+        },
       })}
     >
       <Tab.Screen name="Home" component={Home} />
@@ -61,6 +72,8 @@ function MainTabs() {
 }
 
 function DriverTabs() {
+  const { darkMode } = useTheme();
+
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
@@ -72,9 +85,17 @@ function DriverTabs() {
           else if (route.name === 'DriverSettings') iconName = 'settings-outline';
           return <Ionicons name={iconName} size={size} color={color} />;
         },
-        tabBarActiveTintColor: '#007bff',
-        tabBarInactiveTintColor: 'gray',
+        tabBarActiveTintColor: darkMode ? '#FFA500' : '#007bff',
+        tabBarInactiveTintColor: darkMode ? '#888' : 'gray',
         headerShown: false,
+        tabBarStyle: {
+          backgroundColor: darkMode ? '#1e1e1e' : '#fff',
+          borderTopColor: darkMode ? '#333' : '#e0e0e0',
+        },
+        tabBarLabelStyle: {
+          fontSize: 12,
+          marginBottom: 4,
+        },
       })}
     >
       <Tab.Screen name="DriverHome" component={DriverHome} options={{ title: 'Home' }} />
@@ -84,11 +105,16 @@ function DriverTabs() {
     </Tab.Navigator>
   );
 }
-
 export default function App() {
   const [initialScreen, setInitialScreen] = useState('SignIn');
   const [notificationCount, setNotificationCount] = useState(0);
   const [lastNotification, setLastNotification] = useState(null);
+
+
+  useEffect(() => {
+    const unsubscribeAuth = initUserStatusTracking();
+    return () => unsubscribeAuth();
+  }, []);
 
   // Notification setup and handler
   useEffect(() => {
@@ -239,10 +265,10 @@ export default function App() {
                 ),
               }} 
             />
-            <Stack.Screen name="DriverHistory" component={DriverHistory} options={{ title: 'Trip History' }} />
-            <Stack.Screen name="EarningsDetail" component={EarningsDetail} />
+           <Stack.Screen name="DriverHistory" component={DriverHistory} options={{ headerShown: false }} />
+            <Stack.Screen name="EarningsDetail" component={EarningsDetail} options={{ headerShown: false }}/>
             <Stack.Screen name="ChangePasswordScreen" component={ChangePasswordScreen} options={{ title: 'Change Password' }} />
-            <Stack.Screen name="Chat" component={ChatScreen} />
+            <Stack.Screen name="Chat" component={ChatScreen} options={{ headerShown: false }} />
           </Stack.Navigator>
           
           <Toast />

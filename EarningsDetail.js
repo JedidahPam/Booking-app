@@ -175,11 +175,11 @@ export default function EarningsDetail() {
     switch (status) {
       case 'completed': return '#4CAF50';
       case 'cancelled': return '#F44336';
-      case 'accepted': return '#2196F3';
+       case 'accepted': return '#FFA500'; // Changed from blue to orange
       case 'pending': return '#FFC107';
-      default: return darkMode ? '#FFA500' : '#2196F3';
+      default: return '#FFA500'; // Changed from blue to orange
     }
-   };
+  };
 
   return (
     <SafeAreaView style={styles.container}>
@@ -195,13 +195,13 @@ export default function EarningsDetail() {
             <RefreshControl
               refreshing={refreshing}
               onRefresh={fetchEarningsData}
-              tintColor={darkMode ? '#FFA500' : '#007AFF'}
+              tintColor="#FFA500" // Changed from blue to orange
             />
           }
         >
           <View style={styles.header}>
             <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
-              <Ionicons name="arrow-back" size={28} color={darkMode ? '#FFA500' : '#444'} />
+             <Ionicons name="arrow-back" size={28} color="#FFA500" /> {/* Changed from conditional to orange */}
             </TouchableOpacity>
             <Text style={styles.title}>Earnings Detail</Text>
             <TouchableOpacity 
@@ -210,9 +210,9 @@ export default function EarningsDetail() {
               disabled={loading || refreshing}
             >
               {(loading || refreshing) ? (
-                <ActivityIndicator size="small" color={darkMode ? '#FFA500' : '#444'} />
+                <ActivityIndicator size="small" color="#FFA500" />
               ) : (
-                <Ionicons name="refresh" size={24} color={darkMode ? '#FFA500' : '#444'} />
+                <Ionicons name="refresh" size={24} color="#FFA500" /> 
               )}
             </TouchableOpacity>
           </View>
@@ -269,13 +269,13 @@ export default function EarningsDetail() {
 
                 <View style={styles.tripDetails}>
                   <View style={styles.tripInfo}>
-                    <Ionicons name="location-outline" size={16} color={darkMode ? '#FFA500' : '#007AFF'} />
+                    <Ionicons name="location-outline" size={16} color="#FFA500" />
                     <Text style={styles.tripLocation} numberOfLines={1}>
                       {ride.pickup?.address || 'Pickup Location'}
                     </Text>
                   </View>
                   <View style={styles.tripInfo}>
-                    <Ionicons name="location" size={16} color={darkMode ? '#FFA500' : '#007AFF'} />
+                     <Ionicons name="location" size={16} color="#FFA500" />
                     <Text style={styles.tripLocation} numberOfLines={1}>
                       {ride.dropoff?.address || 'Dropoff Location'}
                     </Text>
@@ -283,18 +283,19 @@ export default function EarningsDetail() {
                 </View>
 
                 <View style={styles.tripFooter}>
-                  <View style={styles.tripMetrics}>
-                    {ride.distance !== undefined && !isNaN(ride.distance) && (
-                      <Text style={styles.tripMetric}>
-                        <Ionicons name="speedometer-outline" size={14} /> {ride.distance.toFixed(1)} km
-                      </Text>
-                    )}
-                  </View>
+  <View style={styles.tripMetrics}>
+    {ride.distance !== undefined && !isNaN(ride.distance) && (
+      <View style={{flexDirection: 'row', alignItems: 'center'}}>
+        <Ionicons name="speedometer-outline" size={14} color={darkMode ? '#ccc' : '#666'} />
+        <Text style={styles.tripMetric}>{ride.distance.toFixed(1)} km</Text>
+      </View>
+    )}
+  </View>
 
-                  {ride.status === 'completed' && (
-                    <Text style={styles.tripEarning}>+${ride.price?.toFixed(2) || '0.00'}</Text>
-                  )}
-                </View>
+  {ride.status === 'completed' && (
+    <Text style={styles.tripEarning}>+${ride.price?.toFixed(2) || '0.00'}</Text>
+  )}
+</View>
               </View>
             ))
           )}
@@ -326,6 +327,7 @@ export default function EarningsDetail() {
   );
 }
 
+
 const createStyles = (darkMode) =>
   StyleSheet.create({
     container: {
@@ -355,7 +357,7 @@ const createStyles = (darkMode) =>
     title: {
       fontSize: 20,
       fontWeight: 'bold',
-      color: darkMode ? '#FFA500' : '#222',
+      color: "#FFA500", // Changed from conditional to orange
     },
     content: {
       flex: 1,
@@ -373,7 +375,7 @@ const createStyles = (darkMode) =>
     sectionTitle: {
       fontSize: 18,
       fontWeight: '700',
-      color: darkMode ? '#FFA500' : '#007AFF',
+      color: "#FFA500", // Changed from blue to orange
       marginBottom: 15,
       paddingHorizontal: 20,
     },
@@ -427,7 +429,7 @@ const createStyles = (darkMode) =>
     statValue: {
       fontSize: 18,
       fontWeight: 'bold',
-      color: darkMode ? '#FFA500' : '#007AFF',
+      color: "#FFA500", // Changed from blue to orange
       marginBottom: 5,
     },
     statLabel: {
@@ -549,7 +551,7 @@ const createStyles = (darkMode) =>
       textAlign: 'center',
       fontSize: 20,
       fontWeight: 'bold',
-      color: darkMode ? '#FFA500' : '#E53935',
+      color: "#FFA500", // Changed from red to orange
     },
     modalText: {
       marginBottom: 20,
@@ -564,7 +566,7 @@ const createStyles = (darkMode) =>
       minWidth: 100,
     },
     buttonClose: {
-      backgroundColor: darkMode ? '#FFA500' : '#007AFF',
+      backgroundColor: "#FFA500", // Changed from blue to orange
     },
     textStyle: {
       color: 'white',
